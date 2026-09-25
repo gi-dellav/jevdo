@@ -1,12 +1,12 @@
 # jevdo
-Jev, Do. | Connects Jev to your shell
 
-A strict-allowlist harness: `environment.toml` defines which bash commands Jev
-(the TypeSafe System One classifier) may select. Jev picks command →
-subcommand → flags (boolean or valued) → path slots; only exact `argv`
-templates from the toml may run. `read` actions run directly; `write` and
-`destructive` actions ask for confirmation (`y/N`, default N, non-tty declines).
-`--dry-run` previews without executing or prompting.
+*Jev, Do. Allows Jev to operate on a bash shell using decision trees.*
+
+jevdo is a strict-allowlist harness. `environment.toml` defines which bash commands Jev (the TypeSafe System One classifier) may select. In one step, Jev picks: command → subcommand → flags (boolean or valued) → path slots; this works by navigating the decision tree as defined by the TOML file.
+
+- `read` actions run directly.
+- `write` and `destructive` actions ask for confirmation (`y/N`, default N; non-tty declines).
+- `--dry-run` previews without executing or prompting.
 
 ## Setup
 
@@ -16,10 +16,19 @@ export TYPESAFE_API_KEY=...   # from https://console.typesafe.ai/keys
 cp environment.toml.example environment.toml
 ```
 
+Or with [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv venv                          # creates .venv
+source .venv/bin/activate
+uv pip install -e .
+export TYPESAFE_API_KEY=...      # from https://console.typesafe.ai/keys
+cp environment.toml.example environment.toml
+```
+
 ### OpenRouter
 
-jevdo can call Jev through [OpenRouter's System One API](https://openrouter.ai/docs/guides/community/typesafe-sdk)
-(billed to your OpenRouter account) instead of TypeSafe Cloud. Pick one:
+jevdo can call Jev through [OpenRouter's System One API](https://openrouter.ai/docs/guides/community/typesafe-sdk) (billed to your OpenRouter account) instead of TypeSafe Cloud. Pick one provider:
 
 ```toml
 # environment.toml
@@ -31,16 +40,19 @@ provider = "openrouter"   # default base_url: https://openrouter.ai/api
 export OPENROUTER_API_KEY=...   # from https://openrouter.ai/settings/keys
 ```
 
-Precedence for the endpoint is `--base-url` > `[meta] base_url` >
-`TYPESAFE_BASE_URL` > provider default; for the key it is
-`TYPESAFE_API_KEY` > `OPENROUTER_API_KEY` (the SDK itself only reads
-`TYPESAFE_API_KEY`, so jevdo forwards `OPENROUTER_API_KEY` explicitly).
-`TYPESAFE_BASE_URL=https://openrouter.ai/api` also works and keeps
-`provider = "typesafe"`. Bare model IDs (`jev-latest`) and prefixed IDs
-(`typesafe/jev-1.13`) are both passed through; model listing via the SDK is
-not supported by OpenRouter — browse https://openrouter.ai/typesafe instead.
+Endpoint precedence (highest first): `--base-url` > `[meta] base_url` > `TYPESAFE_BASE_URL` > provider default.
 
-## `environment.toml`
+Key precedence: `TYPESAFE_API_KEY` > `OPENROUTER_API_KEY`. The SDK itself reads only `TYPESAFE_API_KEY`, so jevdo forwards `OPENROUTER_API_KEY` explicitly.
+
+- `TYPESAFE_BASE_URL=https://openrouter.ai/api` also works and keeps `provider = "typesafe"`.
+- Bare model IDs (`jev-latest`) and prefixed IDs (`typesafe/jev-1.13`) are both passed through.
+- Model listing via the SDK is not supported by OpenRouter. Browse https://openrouter.ai/typesafe instead.
+
+## Configuration
+
+`environment.toml` holds one `[meta]` section and one `[[command]]` table per allowed command.
+
+### `[meta]` settings
 
 ```toml
 [meta]
@@ -52,11 +64,16 @@ max_steps = 1             # 1..10 upper bound; >1 lets Jev decide to continue
 max_history = 5           # optional; cap history entries sent back to Jev
 temperature = 0.0         # optional; sampling temperature (extra_body)
 command_question = "What shell task is the user asking for?"
+
   [meta.risk_thresholds]
   read = 0.5
   write = 0.7
   destructive = 0.9
+```
 
+### Commands, subcommands, flags, and paths
+
+```toml
 [[command]]
 name = "git"
 description = "version control operations"
@@ -102,13 +119,15 @@ instructions_subcommand = "Which git subcommand does the request need?"
     stated_question = "Does the request name a specific Python file?"
 ```
 
-Multi-path example: `argv = ["cp", "{path:src}", "{path:dst}"]` with two
-`[[command.path]]` tables (max 3 slots, one placeholder per token).
+### Multi-path and legacy v1 style
 
-Legacy v1 style (`takes_path`/`path_kind`/`path_optional` + bare `{path}`)
-still loads, desugared to a single slot named `path`. Don't mix both styles.
+Multi-path example: `argv = ["cp", "{path:src}", "{path:dst}"]` with two `[[command.path]]` tables (max 3 slots, one placeholder per token).
+
+Legacy v1 style (`takes_path` / `path_kind` / `path_optional` plus bare `{path}`) still loads. It desugars to a single slot named `path`. Do not mix both styles.
 
 ## Usage
+
+Run `jevdo` with a natural-language request:
 
 ```bash
 jevdo "show git status" --dry-run --show-probs
@@ -125,28 +144,32 @@ jevdo "run tests" --provider openrouter --dry-run  # one-shot OpenRouter routing
 jevdo --eval eval.toml                 # eval harness: plans only, never runs
 ```
 
-`none_of_the_above` semantics: L1 (command) → abstain; L2 (subcommand) → run
-base `argv` as-made (abstain if none); valued-flag/path layer → omit if
-optional, abstain if required. Confidence = least-certain Choice layer.
-Threshold resolution: **CLI `--min-confidence` > per-node > per-risk tier >
-global**; the reason names the winner, e.g. `below minimum 0.70 (risk write)`.
+### Abstention and confidence
 
-Chaining (`--max-steps N` / `meta.max_steps`, `--steps` is a legacy alias):
-N is the upper bound, not a fixed count. While budget remains, each Jev call
-also answers a `__continue__` Noul gate; after a step succeeds the loop stops
-as soon as Jev declines (a missing gate is treated as "stop"). With
-`--max-steps 1` the gate is never asked and the run is single-shot. After each
-step the CWD is rescanned and `{argv, returncode, stdout_tail}` appended to Jev
-state history; `--max-history N` / `meta.max_history` keeps only the N most
-recent entries (0 sends none; unset sends all, still bounded by the step
-budget). Stops on abstention, non-zero exit (unless `--no-stop-on-error`),
-decline, Jev's stop decision, or budget. `dispatch_sequence()` in
-`dispatcher.py` exposes this programmatically.
+`none_of_the_above` semantics, by layer:
+
+- L1 (command): abstain.
+- L2 (subcommand): run base `argv` as-made; abstain if none.
+- Valued-flag/path layer: omit if optional; abstain if required.
+
+Confidence = the least-certain Choice layer.
+
+Threshold resolution (highest first): CLI `--min-confidence` > per-node > per-risk tier > global. The reason names the winner, e.g. `below minimum 0.70 (risk write)`.
+
+### Chaining
+
+`--max-steps N` / `meta.max_steps` set the step budget. N is the upper bound, not a fixed count (`--steps` is a legacy alias).
+
+- While budget remains, each Jev call also answers a `__continue__` Noul gate. After a step succeeds, the loop stops as soon as Jev declines. A missing gate is treated as "stop".
+- With `--max-steps 1`, the gate is never asked and the run is single-shot.
+- After each step, the CWD is rescanned and `{argv, returncode, stdout_tail}` is appended to the Jev state history. `--max-history N` / `meta.max_history` keeps only the N most recent entries (0 sends none; unset sends all, still bounded by the step budget).
+- The run stops on abstention, non-zero exit (unless `--no-stop-on-error`), decline, Jev's stop decision, or budget exhaustion.
+
+`dispatch_sequence()` in `dispatcher.py` exposes this programmatically.
 
 ## Eval mode
 
-`jevdo --eval eval.toml` runs each `[[test]]` input through Jev and compares
-the planned argv to `expected` — nothing is executed, nothing prompts:
+`jevdo --eval eval.toml` runs each `[[test]]` input through Jev and compares the planned argv to `expected`. Nothing executes and nothing prompts:
 
 ```toml
 [[test]]
@@ -165,21 +188,21 @@ input = "launch the rockets"
 expect_abstain = true             # pass iff Jev abstains (no expected)
 ```
 
-Per-test `cwd` (relative, joined onto `--cwd`) and `min_confidence`
-overrides, plus `[meta]` defaults for both, are supported. A string
-`expected` runs single-shot (`max_steps = 1`, no `__continue__` gate); an
-array runs `max_steps = len(expected)` and every planned step's argv must
-match the matching entry, so Jev must not stop early. Exit 0 when all pass,
-5 otherwise. See `eval.toml.example`.
+Per-test overrides exist for `cwd` (relative, joined onto `--cwd`) and `min_confidence`. `[meta]` provides defaults for both.
+
+- A string `expected` runs single-shot (`max_steps = 1`, no `__continue__` gate).
+- An array runs `max_steps = len(expected)`. Every planned step's argv must match the matching entry, so Jev must not stop early.
+
+Exit 0 when all tests pass, 5 otherwise. See `eval.toml.example`.
 
 ## Run logging
 
-`--log PATH` (opt-in) appends one JSON object per line. Interactive runs emit
-a `plan` event (state summary, node, flags, paths, confidence, risk,
-threshold/threshold_source, per-layer decisions, continue gate) followed by a
-`result` event (resolved argv, dry-run/declined/error, returncode, stdout,
-stderr) for each step. Eval mode emits one `eval` event per `[[test]]`.
-Nothing is written without `--log`; the file is opened in append mode.
+`--log PATH` (opt-in) appends one JSON object per line.
+
+- Interactive runs emit a `plan` event (state summary, node, flags, paths, confidence, risk, threshold/threshold_source, per-layer decisions, continue gate) followed by a `result` event (resolved argv, dry-run/declined/error, returncode, stdout, stderr) for each step.
+- Eval mode emits one `eval` event per `[[test]]`.
+
+Nothing is written without `--log`. The file opens in append mode.
 
 ## Layout
 
