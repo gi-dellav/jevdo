@@ -2,6 +2,12 @@
 model = "jev-latest"
 min_confidence = 0.5
 timeout = 60
+# Jev provider: "typesafe" (TypeSafe Cloud) or "openrouter" (OpenRouter
+# System One API at https://openrouter.ai/api, billed to your OpenRouter
+# account). With "openrouter", set OPENROUTER_API_KEY instead of
+# TYPESAFE_API_KEY. Explicit `base_url` / TYPESAFE_BASE_URL win over this.
+provider = "typesafe"
+# base_url = "https://openrouter.ai/api"
 default_risk = "read"
 max_steps = 1
 command_question = "What shell task is the user asking for?"

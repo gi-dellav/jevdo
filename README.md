@@ -16,6 +16,30 @@ export TYPESAFE_API_KEY=...   # from https://console.typesafe.ai/keys
 cp environment.toml.example environment.toml
 ```
 
+### OpenRouter
+
+jevdo can call Jev through [OpenRouter's System One API](https://openrouter.ai/docs/guides/community/typesafe-sdk)
+(billed to your OpenRouter account) instead of TypeSafe Cloud. Pick one:
+
+```toml
+# environment.toml
+[meta]
+provider = "openrouter"   # default base_url: https://openrouter.ai/api
+```
+
+```bash
+export OPENROUTER_API_KEY=...   # from https://openrouter.ai/settings/keys
+```
+
+Precedence for the endpoint is `--base-url` > `[meta] base_url` >
+`TYPESAFE_BASE_URL` > provider default; for the key it is
+`TYPESAFE_API_KEY` > `OPENROUTER_API_KEY` (the SDK itself only reads
+`TYPESAFE_API_KEY`, so jevdo forwards `OPENROUTER_API_KEY` explicitly).
+`TYPESAFE_BASE_URL=https://openrouter.ai/api` also works and keeps
+`provider = "typesafe"`. Bare model IDs (`jev-latest`) and prefixed IDs
+(`typesafe/jev-1.13`) are both passed through; model listing via the SDK is
+not supported by OpenRouter — browse https://openrouter.ai/typesafe instead.
+
 ## `environment.toml`
 
 ```toml
@@ -91,6 +115,7 @@ jevdo "stage readme"                   # -> git add ... (asks [y/N], risk write)
 jevdo "copy readme into docs"          # -> cp README.md docs
 jevdo "run tests" --steps 2            # chained: re-plans after each step
 jevdo "run tests" --min-confidence 0.8 # CLI flag wins over all config
+jevdo "run tests" --provider openrouter --dry-run  # one-shot OpenRouter routing
 jevdo --eval eval.toml                 # eval harness: plans only, never runs
 ```
 
@@ -129,10 +154,11 @@ pass, 5 otherwise. See `eval.toml.example`.
 ## Layout
 
 - `src/jevdo/config.py` – toml loading + validation, risk/threshold resolution
+- `src/jevdo/client.py` – provider/base_url/API-key resolution, `TypeSafeClient` factory
 - `src/jevdo/discovery.py` – recursive `discover()` + containment-safe validation
 - `src/jevdo/questions.py` – Jev Choice/Noul builder + custom instructions
 - `src/jevdo/dispatcher.py` – `system_one` call, branch reader, `dispatch_sequence`
 - `src/jevdo/executor.py` – strict multi-slot/`{value}` resolution + `subprocess`
 - `src/jevdo/cli.py` – `jevdo` entrypoint, confirm prompt, step transcript
 - `src/jevdo/eval.py` – `--eval` toml loading + no-exec comparison harness
-- `tests/` – 68 tests (`PYTHONPATH=src:tests pytest`)
+- `tests/` – 79 tests (`PYTHONPATH=src:tests pytest`)

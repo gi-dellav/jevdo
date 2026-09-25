@@ -1,4 +1,5 @@
 """CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]
+  [--provider typesafe|openrouter] [--base-url URL]
 
 Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes)."""
 
@@ -6,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
-import os
 import sys
 
 from jevdo.config import ConfigError, load_config
@@ -19,6 +19,27 @@ EXIT_CONFIG = 2
 EXIT_ABSTAIN = 3
 EXIT_EXEC_FAIL = 4
 EXIT_EVAL_FAIL = 5
+
+
+def apply_cli_overrides(config, args):
+    """Fold --provider/--base-url into the loaded config. Returns new config."""
+    provider = getattr(args, "provider", None)
+    base_url = getattr(args, "base_url", None)
+    if provider is None and base_url is None:
+        return config
+    from jevdo.config import PROVIDERS, ConfigError
+    if provider is not None and provider not in PROVIDERS:
+        raise ConfigError(f"--provider must be one of {PROVIDERS}")
+    if base_url is not None:
+        base_url = base_url.strip().rstrip("/")
+        if not base_url or not (base_url.startswith("http://")
+                                or base_url.startswith("https://")):
+            raise ConfigError("--base-url must start with http:// or https://")
+    return dataclasses.replace(
+        config,
+        provider=provider if provider is not None else config.provider,
+        base_url=base_url if base_url is not None else config.base_url,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -42,6 +63,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--eval", dest="eval_file", default=None, metavar="EVAL_TOML",
                    help="eval mode: run [[test]] cases from a toml file, "
                    "compare planned argv to expected, never execute")
+    p.add_argument("--provider", choices=("typesafe", "openrouter"), default=None,
+                   help="Jev provider: typesafe cloud or openrouter "
+                   "(default: meta.provider)")
+    p.add_argument("--base-url", default=None, metavar="URL",
+                   help="override the System One API base URL "
+                   "(default: meta.base_url, TYPESAFE_BASE_URL, or provider default; "
+                   "OpenRouter: https://openrouter.ai/api)")
     return p
 
 
@@ -72,9 +100,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.steps is not None and not 1 <= args.steps <= 10:
         print("jevdo: --steps must be in [1, 10]", file=sys.stderr)
         return EXIT_CONFIG
+    try:
+        config = apply_cli_overrides(config, args)
+    except ConfigError as e:
+        print(f"jevdo: config error: {e}", file=sys.stderr)
+        return EXIT_CONFIG
 
-    if not os.environ.get("TYPESAFE_API_KEY"):
-        print("jevdo: TYPESAFE_API_KEY is not set", file=sys.stderr)
+    from jevdo.client import has_api_key
+
+    if not has_api_key(config):
+        print("jevdo: no API key found: set TYPESAFE_API_KEY or OPENROUTER_API_KEY"
+              " (see README for OpenRouter setup)", file=sys.stderr)
         return EXIT_CONFIG
 
     if args.eval_file is not None:

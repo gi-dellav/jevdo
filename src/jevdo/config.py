@@ -6,6 +6,10 @@ Schema (v2):
 model = "jev-latest"
 min_confidence = 0.5        # global fallback
 timeout = 60
+provider = "typesafe"       # typesafe | openrouter (OpenRouter System One API)
+base_url = "https://..."    # optional override; wins over provider default and
+                            # TYPESAFE_BASE_URL. OpenRouter default:
+                            # https://openrouter.ai/api
 default_risk = "read"       # read | write | destructive
 max_steps = 1               # 1..10, chained multi-step loop budget
 command_question = "..."    # optional override for the L1 question text
@@ -81,6 +85,8 @@ PATH_PLACEHOLDER = "{path}"
 VALUE_PLACEHOLDER = "{value}"
 PATH_KINDS = ("files", "dirs", "both")
 RISKS = ("read", "write", "destructive")
+PROVIDERS = ("typesafe", "openrouter")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api"
 MAX_INSTRUCTION_LEN = 500
 MAX_SLOTS = 3
 
@@ -158,11 +164,22 @@ class EnvConfig:
     risk_thresholds: dict = field(default_factory=dict)
     max_steps: int = 1
     command_question: str | None = None
+    provider: str = "typesafe"
+    base_url: str | None = None
 
     def get_command(self, name: str) -> Command | None:
         for c in self.commands:
             if c.name == name:
                 return c
+        return None
+
+    @property
+    def effective_base_url(self) -> str | None:
+        """SDK base URL: explicit base_url, else OpenRouter default, else SDK default."""
+        if self.base_url:
+            return self.base_url.rstrip("/")
+        if self.provider == "openrouter":
+            return OPENROUTER_BASE_URL
         return None
 
 
@@ -561,6 +578,17 @@ def load_config(path: str) -> EnvConfig:
     command_question = None
     if meta.get("command_question") is not None:
         command_question = _opt_instruction(meta, "command_question", "meta")
+    provider = meta.get("provider", "typesafe")
+    if not isinstance(provider, str) or provider.strip() not in PROVIDERS:
+        raise ConfigError(f"meta.provider must be one of {PROVIDERS}")
+    provider = provider.strip()
+    base_url = meta.get("base_url")
+    if base_url is not None:
+        if not isinstance(base_url, str) or not base_url.strip():
+            raise ConfigError("meta.base_url must be a non-empty string")
+        base_url = base_url.strip().rstrip("/")
+        if not (base_url.startswith("http://") or base_url.startswith("https://")):
+            raise ConfigError("meta.base_url must start with http:// or https://")
 
     raw_cmds = data.get("command", [])
     if raw_cmds is None:
@@ -581,6 +609,7 @@ def load_config(path: str) -> EnvConfig:
         timeout=float(timeout), commands=tuple(commands),
         default_risk=default_risk, risk_thresholds=risk_thresholds,
         max_steps=max_steps, command_question=command_question,
+        provider=provider, base_url=base_url,
     )
 
 

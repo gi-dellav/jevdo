@@ -267,7 +267,7 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
              min_confidence: float | None = None, history: list | None = None):
     """Live dispatch: build state+questions, call Jev once, plan. Returns
     (PlanOutcome, questions, context, response)."""
-    from typesafe_sdk import TypeSafeClient
+    from jevdo.client import create_client
 
     from jevdo.questions import build_questions, state_preview
 
@@ -281,7 +281,7 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
         state["history"] = history
     own = False
     if client is None:
-        client = TypeSafeClient()
+        client = create_client(config)
         own = True
     try:
         response = client.system_one(state=state, questions=questions, model=config.model)
@@ -314,8 +314,8 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
     history: list[dict] = []
     own = False
     if client is None and execute_fn is None:
-        from typesafe_sdk import TypeSafeClient
-        client = TypeSafeClient()
+        from jevdo.client import create_client
+        client = create_client(config)
         own = True
     try:
         for i in range(budget):
