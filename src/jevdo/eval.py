@@ -16,8 +16,10 @@ Schema (eval.toml):
   min_confidence = 0.5
 
 In eval mode no shell commands are executed: each input goes through
-dispatcher.dispatch() + executor.resolve_argv() only. Pass iff the resolved
-argv equals shlex.split(expected) (or abstention matches expect_abstain).
+dispatcher.dispatch() + executor.resolve_argv() only. Each case is planned
+with `max_steps=1` (no `__continue__` gate, never chains). Pass iff the
+resolved argv equals shlex.split(expected) (or abstention matches
+expect_abstain).
 """
 
 from __future__ import annotations
@@ -210,7 +212,8 @@ def run_eval(config, cases: list[EvalCase], base_cwd: str = ".", *,
         bar = case.min_confidence if case.min_confidence is not None else min_confidence
         try:
             outcome, _q, _c, _r = dispatch(
-                config, case.input, cwd, client=client, min_confidence=bar)
+                config, case.input, cwd, client=client, min_confidence=bar,
+                max_steps=1)
         except Exception as e:
             results.append(EvalTestResult(case, False, None, f"Jev call failed: {e}"))
             continue

@@ -36,3 +36,11 @@ def test_custom_instructions(config, tmp_path):
     q, _ = build_questions(cfg, str(tmp_path))
     assert q["__command__"].instructions == "Do what?"
     assert q["__subcommand__:git"].instructions == "Pick it?"
+
+
+def test_continue_gate_only_when_allowed(config, workdir):
+    from jevdo.questions import CONTINUE_QID
+    q, _ = build_questions(config, workdir)
+    assert CONTINUE_QID not in q
+    q2, _ = build_questions(config, workdir, allow_continue=True)
+    assert q2[CONTINUE_QID].type == "noul"

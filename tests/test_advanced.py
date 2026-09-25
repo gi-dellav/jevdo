@@ -6,7 +6,10 @@ from jevdo.config import (
     Command, EnvConfig, Flag, PathSlot, Subcommand,
     effective_threshold, node_risk,
 )
-from jevdo.dispatcher import PlannedAction, dispatch_sequence, plan_from_answers
+from jevdo.dispatcher import (
+    PlannedAction, _clip_history, continue_requested, dispatch,
+    dispatch_sequence, plan_from_answers,
+)
 from conftest import FakeChoice, FakeNoul, sample_config
 
 
@@ -135,6 +138,43 @@ def test_sequence_stops_on_error():
 
 def test_sequence_max_steps():
     cfg = sample_config()
+    class FakeResp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99),
+                   "__continue__": FakeNoul(0.9)}
+
+    class FakeClient:
+        def system_one(self, **kw): return FakeResp()
+
+    def ok_exec(action, cwd):
+        return (["pytest", "-q"], 0, "ok", "")
+
+    steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
+                                      execute_fn=ok_exec, max_steps=2)
+    assert len(steps) == 2 and reason == "max_steps reached"
+
+
+def test_sequence_stops_when_jev_declines_to_continue():
+    cfg = sample_config()
+    calls = {"n": 0}
+
+    class FakeResp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99),
+                   "__continue__": FakeNoul(0.1)}
+
+    class FakeClient:
+        def system_one(self, **kw): return FakeResp()
+
+    def ok_exec(action, cwd):
+        calls["n"] += 1
+        return (["pytest", "-q"], 0, "ok", "")
+
+    steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
+                                      execute_fn=ok_exec, max_steps=5)
+    assert len(steps) == 1 and "Jev ended" in reason and calls["n"] == 1
+
+
+def test_sequence_missing_continue_gate_stops():
+    cfg = sample_config()
 
     class FakeResp:
         answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
@@ -146,5 +186,123 @@ def test_sequence_max_steps():
         return (["pytest", "-q"], 0, "ok", "")
 
     steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
-                                      execute_fn=ok_exec, max_steps=2)
-    assert len(steps) == 2 and reason == "max_steps reached"
+                                      execute_fn=ok_exec, max_steps=4)
+    assert len(steps) == 1 and "Jev ended" in reason  # fail-closed
+
+
+def test_sequence_max_steps_one_never_asks_continue():
+    cfg = sample_config()
+    seen = {}
+
+    class FakeResp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw):
+            seen["questions"] = kw.get("questions", {})
+            return FakeResp()
+
+    def ok_exec(action, cwd):
+        return (["pytest", "-q"], 0, "ok", "")
+
+    steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
+                                      execute_fn=ok_exec, max_steps=1)
+    assert len(steps) == 1 and reason == "max_steps reached"
+    assert "__continue__" not in seen["questions"]
+
+
+def test_clip_history():
+    hist = [{"step": i} for i in range(1, 6)]
+    assert _clip_history(hist, None) == hist
+    assert _clip_history(hist, 2) == hist[-2:]
+    assert _clip_history(hist, 0) == []
+    assert _clip_history([], 3) == []
+
+
+def test_continue_requested_fail_closed():
+    class Resp:
+        def __init__(self, answers): self.answers = answers
+
+    assert continue_requested(Resp({"__continue__": FakeNoul(0.9)})) is True
+    assert continue_requested(Resp({"__continue__": FakeNoul(0.49)})) is False
+    assert continue_requested(Resp({})) is False
+    assert continue_requested(Resp(None)) is False
+
+
+def test_dispatch_clips_history_and_asks_continue(config, tmp_path):
+    seen = {}
+
+    class Resp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw):
+            seen["state"] = kw["state"]
+            seen["questions"] = kw["questions"]
+            return Resp()
+
+    hist = [{"step": i} for i in range(1, 6)]
+    dispatch(config, "run tests", str(tmp_path), client=FakeClient(),
+             history=hist, max_steps=4, max_history=2, allow_continue=True)
+    assert seen["state"]["history"] == hist[-2:]
+    assert "__continue__" in seen["questions"]
+
+    dispatch(config, "run tests", str(tmp_path), client=FakeClient(),
+             max_steps=1)
+    assert "history" not in seen["state"]
+    assert "__continue__" not in seen["questions"]
+
+
+def _cli_args(*argv):
+    from jevdo import cli
+    return cli.build_parser().parse_args(list(argv))
+
+
+def test_cli_run_sequence_stops_when_jev_declines(monkeypatch, config):
+    from jevdo import cli
+    from jevdo.dispatcher import PlanOutcome
+    from jevdo.executor import ExecutionResult
+
+    calls = {"n": 0}
+    answers = iter([True, False])
+
+    def fake_dispatch(cfg, request, cwd=".", **kw):
+        a = PlannedAction(command="pytest", subcommand=None, confidence=0.9,
+                          risk="read")
+        return PlanOutcome(True, a, "ok", 0.9), {}, {}, object()
+
+    monkeypatch.setattr(cli, "dispatch", fake_dispatch)
+    monkeypatch.setattr(cli, "continue_requested", lambda resp: next(answers))
+
+    def fake_exec(cfg, action, cwd):
+        calls["n"] += 1
+        return ExecutionResult(argv=["pytest", "-q"], returncode=0,
+                               stdout="", stderr="")
+
+    monkeypatch.setattr(cli, "execute", fake_exec)
+    args = _cli_args("run tests", "--max-steps", "5")
+    rc = cli.run_sequence(config, args, 5)
+    assert rc == cli.EXIT_OK and calls["n"] == 2
+
+
+def test_cli_max_steps_one_never_asks_continue(monkeypatch, config):
+    from jevdo import cli
+    from jevdo.dispatcher import PlanOutcome
+    from jevdo.executor import ExecutionResult
+
+    def fake_dispatch(cfg, request, cwd=".", **kw):
+        a = PlannedAction(command="pytest", subcommand=None, confidence=0.9,
+                          risk="read")
+        return PlanOutcome(True, a, "ok", 0.9), {}, {}, object()
+
+    def boom(resp):
+        raise AssertionError("must not ask continue at max-steps=1")
+
+    monkeypatch.setattr(cli, "dispatch", fake_dispatch)
+    monkeypatch.setattr(cli, "continue_requested", boom)
+    monkeypatch.setattr(cli, "execute",
+                        lambda cfg, a, cwd: ExecutionResult(
+                            argv=["pytest", "-q"], returncode=0,
+                            stdout="", stderr=""))
+    args = _cli_args("run tests", "--max-steps", "1")
+    assert cli.run_sequence(config, args, 1) == cli.EXIT_OK

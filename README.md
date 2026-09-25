@@ -48,7 +48,8 @@ model = "jev-latest"
 min_confidence = 0.5
 timeout = 60
 default_risk = "read"     # read | write | destructive
-max_steps = 1             # chained multi-step budget 1..10
+max_steps = 1             # 1..10 upper bound; >1 lets Jev decide to continue
+max_history = 5           # optional; cap history entries sent back to Jev
 command_question = "What shell task is the user asking for?"
   [meta.risk_thresholds]
   read = 0.5
@@ -113,7 +114,9 @@ jevdo "show git status" --dry-run --show-probs
 jevdo "brief git history"              # -> git log --oneline
 jevdo "stage readme"                   # -> git add ... (asks [y/N], risk write)
 jevdo "copy readme into docs"          # -> cp README.md docs
-jevdo "run tests" --steps 2            # chained: re-plans after each step
+jevdo "run tests" --max-steps 3        # dynamic chaining: Jev decides each step
+jevdo "run tests" --max-steps 1        # single shot (never asks to continue)
+jevdo "run tests" --max-history 2      # send back at most 2 prior steps
 jevdo "run tests" --min-confidence 0.8 # CLI flag wins over all config
 jevdo "run tests" --provider openrouter --dry-run  # one-shot OpenRouter routing
 jevdo --eval eval.toml                 # eval harness: plans only, never runs
@@ -125,10 +128,17 @@ optional, abstain if required. Confidence = least-certain Choice layer.
 Threshold resolution: **CLI `--min-confidence` > per-node > per-risk tier >
 global**; the reason names the winner, e.g. `below minimum 0.70 (risk write)`.
 
-Chaining (`--steps N` / `meta.max_steps`): after each step the CWD is
-rescanned and `{argv, returncode, stdout_tail}` appended to Jev state history.
-Stops on abstention, non-zero exit (unless `--no-stop-on-error`), decline, or
-budget. `dispatch_sequence()` in `dispatcher.py` exposes this programmatically.
+Chaining (`--max-steps N` / `meta.max_steps`, `--steps` is a legacy alias):
+N is the upper bound, not a fixed count. While budget remains, each Jev call
+also answers a `__continue__` Noul gate; after a step succeeds the loop stops
+as soon as Jev declines (a missing gate is treated as "stop"). With
+`--max-steps 1` the gate is never asked and the run is single-shot. After each
+step the CWD is rescanned and `{argv, returncode, stdout_tail}` appended to Jev
+state history; `--max-history N` / `meta.max_history` keeps only the N most
+recent entries (0 sends none; unset sends all, still bounded by the step
+budget). Stops on abstention, non-zero exit (unless `--no-stop-on-error`),
+decline, Jev's stop decision, or budget. `dispatch_sequence()` in
+`dispatcher.py` exposes this programmatically.
 
 ## Eval mode
 
@@ -148,8 +158,9 @@ expect_abstain = true             # pass iff Jev abstains (no expected)
 ```
 
 Per-test `cwd` (relative, joined onto `--cwd`) and `min_confidence`
-overrides, plus `[meta]` defaults for both, are supported. Exit 0 when all
-pass, 5 otherwise. See `eval.toml.example`.
+overrides, plus `[meta]` defaults for both, are supported. Every eval case is
+planned with `max_steps = 1` (no `__continue__` gate, never chains). Exit 0
+when all pass, 5 otherwise. See `eval.toml.example`.
 
 ## Layout
 
@@ -161,4 +172,4 @@ pass, 5 otherwise. See `eval.toml.example`.
 - `src/jevdo/executor.py` – strict multi-slot/`{value}` resolution + `subprocess`
 - `src/jevdo/cli.py` – `jevdo` entrypoint, confirm prompt, step transcript
 - `src/jevdo/eval.py` – `--eval` toml loading + no-exec comparison harness
-- `tests/` – 79 tests (`PYTHONPATH=src:tests pytest`)
+- `tests/` – 88 tests (`PYTHONPATH=src:tests pytest`)

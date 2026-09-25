@@ -11,7 +11,8 @@ base_url = "https://..."    # optional override; wins over provider default and
                             # TYPESAFE_BASE_URL. OpenRouter default:
                             # https://openrouter.ai/api
 default_risk = "read"       # read | write | destructive
-max_steps = 1               # 1..10, chained multi-step loop budget
+max_steps = 1               # 1..10 upper bound; >1 lets Jev decide to continue
+max_history = 5             # optional; cap history entries sent back to Jev
 command_question = "..."    # optional override for the L1 question text
   [meta.risk_thresholds]
   read = 0.5
@@ -163,6 +164,7 @@ class EnvConfig:
     default_risk: str = "read"
     risk_thresholds: dict = field(default_factory=dict)
     max_steps: int = 1
+    max_history: int | None = None
     command_question: str | None = None
     provider: str = "typesafe"
     base_url: str | None = None
@@ -575,6 +577,11 @@ def load_config(path: str) -> EnvConfig:
     max_steps = meta.get("max_steps", 1)
     if not isinstance(max_steps, int) or isinstance(max_steps, bool) or not 1 <= max_steps <= 10:
         raise ConfigError("meta.max_steps must be an integer in [1, 10]")
+    max_history = meta.get("max_history")
+    if max_history is not None:
+        if (not isinstance(max_history, int) or isinstance(max_history, bool)
+                or max_history < 0):
+            raise ConfigError("meta.max_history must be a non-negative integer")
     command_question = None
     if meta.get("command_question") is not None:
         command_question = _opt_instruction(meta, "command_question", "meta")
@@ -608,7 +615,8 @@ def load_config(path: str) -> EnvConfig:
         model=model.strip(), min_confidence=float(min_conf),
         timeout=float(timeout), commands=tuple(commands),
         default_risk=default_risk, risk_thresholds=risk_thresholds,
-        max_steps=max_steps, command_question=command_question,
+        max_steps=max_steps, max_history=max_history,
+        command_question=command_question,
         provider=provider, base_url=base_url,
     )
 

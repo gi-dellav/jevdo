@@ -188,3 +188,17 @@ def test_instruction_length_capped(tmp_path):
                        'model = "jev-latest"\ncommand_question = "' + "q" * 501 + '"')
     with pytest.raises(ConfigError, match="<= 500 chars"):
         load_config(_write(tmp_path, doc))
+
+
+def test_max_history_parsing(tmp_path):
+    cfg = load_config(_write(tmp_path, BASE))
+    assert cfg.max_history is None
+    cfg2 = load_config(_write(tmp_path, BASE.replace(
+        'model = "jev-latest"', 'model = "jev-latest"\nmax_history = 3')))
+    assert cfg2.max_history == 3
+    with pytest.raises(ConfigError, match="non-negative integer"):
+        load_config(_write(tmp_path, BASE.replace(
+            'model = "jev-latest"', 'model = "jev-latest"\nmax_history = -1')))
+    with pytest.raises(ConfigError, match="non-negative integer"):
+        load_config(_write(tmp_path, BASE.replace(
+            'model = "jev-latest"', 'model = "jev-latest"\nmax_history = true')))

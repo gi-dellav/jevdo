@@ -7,6 +7,8 @@ Layers:
   `flagval.<node>.<flag>` Choice over values + none_of_the_above.
 - L4 paths: one `path.<node>.<slot>` Choice + optional
   `path_stated.<node>.<slot>` Noul gate, per slot.
+- Chaining: optional `__continue__` Noul when `allow_continue` is set; Jev
+  decides whether another step should follow.
 
 Custom instructions: [meta] command_question, per-command
 instructions_subcommand, per-slot question/stated_question, per-flag question.
@@ -23,6 +25,13 @@ NONE_DESC = "none of the above; the request does not match any listed option"
 NONE_PATH_DESC = "none of the listed files/directories matches the request"
 NONE_VALUE_DESC = "none of the listed values matches the request"
 
+CONTINUE_QID = "__continue__"
+CONTINUE_INSTRUCTIONS = (
+    "Given the request and the steps already taken, should Jev take another "
+    "shell step after this one? Answer no if the request is complete or the "
+    "current step finishes it."
+)
+
 MAX_CHOICE_OPTIONS = 255  # Jev Choice limit
 STATE_PREVIEW_LIMIT = 100
 
@@ -31,15 +40,20 @@ def _node_key(cmd: str, sub: str | None) -> str:
     return cmd if sub is None else f"{cmd}.{sub}"
 
 
-def build_questions(config: EnvConfig, cwd: str = "."):
+def build_questions(config: EnvConfig, cwd: str = ".", *,
+                    allow_continue: bool = False):
     """Return (questions, context).
 
     context = {"candidates": {(node, slot): [names]},
                "cwd_files": [...], "cwd_dirs": [...]}
     Legacy "node" keys are also present for single-slot nodes.
+    When allow_continue is true, a `__continue__` Noul is included.
     """
     questions: dict = {}
     candidates: dict = {}
+
+    if allow_continue:
+        questions[CONTINUE_QID] = Noul(instructions=CONTINUE_INSTRUCTIONS)
 
     # L1: command
     cmd_criteria = {c.name: c.description for c in config.commands}

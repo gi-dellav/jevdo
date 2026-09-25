@@ -10,6 +10,7 @@ provider = "typesafe"
 # base_url = "https://openrouter.ai/api"
 default_risk = "read"
 max_steps = 1
+# max_history = 5          # cap history entries sent to Jev when chaining (0 = none)
 command_question = "What shell task is the user asking for?"
   [meta.risk_thresholds]
   read = 0.5

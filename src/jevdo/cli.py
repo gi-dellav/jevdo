@@ -1,7 +1,9 @@
 """CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]
-  [--provider typesafe|openrouter] [--base-url URL]
+  [--max-steps N] [--max-history N] [--provider typesafe|openrouter]
+  [--base-url URL]
 
-Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes)."""
+Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes,
+always max_steps = 1)."""
 
 from __future__ import annotations
 
@@ -10,7 +12,7 @@ import dataclasses
 import sys
 
 from jevdo.config import ConfigError, load_config
-from jevdo.dispatcher import dispatch, dispatch_sequence
+from jevdo.dispatcher import continue_requested, dispatch, dispatch_sequence
 from jevdo.eval import EvalError, load_eval, run_eval
 from jevdo.executor import ExecutionError, execute, resolve_argv
 
@@ -55,8 +57,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show-probs", action="store_true", help="print per-layer distributions")
     p.add_argument("--min-confidence", type=float, default=None,
                    help="override all configured thresholds (CLI wins)")
-    p.add_argument("--steps", type=int, default=None,
-                   help="chained multi-step budget 1..10 (default: meta.max_steps)")
+    p.add_argument("--max-steps", "--steps", dest="max_steps", type=int, default=None,
+                   metavar="N",
+                   help="upper bound on chained steps 1..10; 1 disables chaining "
+                        "(default: meta.max_steps). Jev decides whether to continue.")
+    p.add_argument("--max-history", type=int, default=None, metavar="N",
+                   help="max history entries sent back to Jev when chaining "
+                        "(default: meta.max_history; 0 sends none)")
     p.add_argument("--stop-on-error", dest="stop_on_error", action="store_true", default=True)
     p.add_argument("--no-stop-on-error", dest="stop_on_error", action="store_false",
                    help="continue chaining after non-zero exit")
@@ -97,8 +104,11 @@ def main(argv: list[str] | None = None) -> int:
         if not 0 <= args.min_confidence <= 1:
             print("jevdo: --min-confidence must be in [0, 1]", file=sys.stderr)
             return EXIT_CONFIG
-    if args.steps is not None and not 1 <= args.steps <= 10:
-        print("jevdo: --steps must be in [1, 10]", file=sys.stderr)
+    if args.max_steps is not None and not 1 <= args.max_steps <= 10:
+        print("jevdo: --max-steps must be in [1, 10]", file=sys.stderr)
+        return EXIT_CONFIG
+    if args.max_history is not None and args.max_history < 0:
+        print("jevdo: --max-history must be >= 0", file=sys.stderr)
         return EXIT_CONFIG
     try:
         config = apply_cli_overrides(config, args)
@@ -119,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         print("jevdo: the following arguments are required: request", file=sys.stderr)
         return EXIT_CONFIG
 
-    budget = args.steps if args.steps is not None else config.max_steps
+    budget = args.max_steps if args.max_steps is not None else config.max_steps
     if budget > 1:
         return run_sequence(config, args, budget)
 
@@ -177,14 +187,21 @@ def run_action(config, args, action) -> int:
 
 
 def run_sequence(config, args, budget: int) -> int:
-    """Plan+confirm+execute loop with refreshed CWD between steps."""
+    """Plan+confirm+execute loop; Jev decides after each step whether to continue.
+
+    `budget` is the upper bound. With budget == 1 no `__continue__` gate is
+    asked. `--max-history` caps how many prior steps are sent back to Jev.
+    """
     history: list[dict] = []
     final = EXIT_OK
     for i in range(budget):
+        ask_continue = budget > 1 and i + 1 < budget
         try:
-            outcome, _q, _c, _r = dispatch(
+            outcome, _q, _c, response = dispatch(
                 config, args.request, args.cwd,
-                min_confidence=args.min_confidence, history=history or None)
+                min_confidence=args.min_confidence, history=history or None,
+                max_steps=budget, max_history=args.max_history,
+                allow_continue=ask_continue)
         except (ConfigError, ValueError) as e:
             print(f"jevdo: step {i+1}: {e}", file=sys.stderr)
             return EXIT_CONFIG if isinstance(e, ConfigError) else EXIT_ABSTAIN
@@ -211,6 +228,9 @@ def run_sequence(config, args, budget: int) -> int:
         if args.dry_run:
             print(f"{tag}: + {' '.join(preview)}  (confidence {action.confidence:.2f}, "
                   f"risk {action.risk}) [dry-run]")
+            if ask_continue and not continue_requested(response):
+                print(f"jevdo: done after step {i+1} (dry-run)")
+                return EXIT_OK
             continue
         confirmed = True
         if action.risk in ("write", "destructive"):
@@ -238,6 +258,9 @@ def run_sequence(config, args, budget: int) -> int:
             if args.stop_on_error:
                 print(f"jevdo: stop: step {i+1} exited {result.returncode}")
                 return final
+        if ask_continue and not continue_requested(response):
+            print(f"jevdo: done after step {i+1}")
+            return final
     if args.dry_run:
         return EXIT_OK
     print("jevdo: max_steps reached" if len(history) == budget else "jevdo: done")

@@ -2,6 +2,7 @@
 # optional defaults for every [[test]] below
 # cwd = "."
 # min_confidence = 0.5
+# Every test is planned single-shot (max_steps = 1): eval never chains.
 
 [[test]]
 name = "status"

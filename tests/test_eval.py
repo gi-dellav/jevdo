@@ -189,6 +189,25 @@ def test_run_eval_per_case_cwd_and_threshold(config, tmp_path, monkeypatch):
     assert seen["cwd"].endswith("sub") and seen["min_confidence"] == 0.77
 
 
+def test_run_eval_forces_max_steps_one(config, tmp_path, monkeypatch):
+    import jevdo.dispatcher as disp
+
+    seen = {}
+
+    def fake_dispatch(cfg, request, cwd=".", **kw):
+        seen["max_steps"] = kw.get("max_steps")
+        a = PlannedAction(command="pytest", subcommand=None, confidence=0.9, risk="read")
+        return _outcome(a), None, None, None
+
+    monkeypatch.setattr(disp, "dispatch", fake_dispatch)
+    import dataclasses
+    cfg = dataclasses.replace(config, max_steps=5)
+    cases = [EvalCase(name="t", input="run tests", expected=("pytest", "-q"),
+                      expected_str="pytest -q")]
+    summary = run_eval(cfg, cases, str(tmp_path))
+    assert summary.ok and seen["max_steps"] == 1
+
+
 def test_cli_eval_mode_exits(monkeypatch, tmp_path, config, capsys):
     from jevdo import cli
 

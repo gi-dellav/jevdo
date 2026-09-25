@@ -6,6 +6,10 @@ judgement, not product). Abstains when:
 - L2 picks none_of_the_above and base argv is None
 - required path/valued slot missing or none
 - confidence < effective threshold (CLI > node > risk tier > global)
+
+Chaining is Jev-decided: each step optionally carries a `__continue__` Noul
+(absent when max_steps == 1); `dispatch_sequence` stops early when it is not
+affirmed. History sent back is capped by max_history.
 """
 
 from __future__ import annotations
@@ -16,8 +20,9 @@ from jevdo.config import (
     RESERVED, EnvConfig, effective_threshold, node_for_selection,
     node_risk, node_slots,
 )
+from jevdo.questions import CONTINUE_QID
 
-PATH_YES = 0.5  # Noul threshold for stated-gates and flags
+PATH_YES = 0.5  # Noul threshold for stated-gates, flags, and continue gate
 
 
 @dataclass(frozen=True)
@@ -263,22 +268,61 @@ def _min_or_zero(xs: list[float]) -> float:
     return min(xs) if xs else 0.0
 
 
+def _clip_history(history: list, max_history: int | None) -> list:
+    """Keep at most max_history most-recent entries (None => unlimited)."""
+    if not history:
+        return []
+    if max_history is None:
+        return list(history)
+    if max_history <= 0:
+        return []
+    return list(history[-max_history:])
+
+
+def continue_requested(response) -> bool:
+    """True iff Jev answered the `__continue__` Noul affirmatively.
+
+    Missing/abstaining/malformed answer => False (fail-closed).
+    """
+    answers = getattr(response, "answers", None)
+    if not isinstance(answers, dict):
+        return False
+    ans = answers.get(CONTINUE_QID)
+    if ans is None or getattr(ans, "type", None) != "noul":
+        return False
+    try:
+        return float(ans.noul) >= PATH_YES
+    except (TypeError, ValueError):
+        return False
+
+
 def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
-             min_confidence: float | None = None, history: list | None = None):
+             min_confidence: float | None = None, history: list | None = None,
+             max_steps: int | None = None, max_history: int | None = None,
+             allow_continue: bool | None = None):
     """Live dispatch: build state+questions, call Jev once, plan. Returns
-    (PlanOutcome, questions, context, response)."""
+    (PlanOutcome, questions, context, response).
+
+    allow_continue adds the `__continue__` gate; defaults to (budget > 1).
+    max_history caps history entries sent to Jev; defaults to config.max_history.
+    """
     from jevdo.client import create_client
 
     from jevdo.questions import build_questions, state_preview
 
-    questions, context = build_questions(config, cwd)
+    budget = config.max_steps if max_steps is None else max_steps
+    if allow_continue is None:
+        allow_continue = budget > 1
+    cap = config.max_history if max_history is None else max_history
+    questions, context = build_questions(config, cwd, allow_continue=allow_continue)
     state = {
         "request": request,
         "cwd_files": state_preview(context["cwd_files"]),
         "cwd_dirs": state_preview(context["cwd_dirs"]),
     }
-    if history:
-        state["history"] = history
+    hist = _clip_history(history or [], cap)
+    if hist:
+        state["history"] = hist
     own = False
     if client is None:
         client = create_client(config)
@@ -298,9 +342,13 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
 
 def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                       client=None, min_confidence: float | None = None,
-                      max_steps: int | None = None, execute_fn=None,
-                      workflow: list[str] | None = None):
+                      max_steps: int | None = None, max_history: int | None = None,
+                      execute_fn=None, workflow: list[str] | None = None):
     """Chained dispatch: plan -> execute -> refresh -> repeat.
+
+    Each step includes a `__continue__` Noul so Jev decides whether to chain
+    further; the loop stops early when Jev says no (or the gate is absent).
+    `max_steps` is the upper bound (1 => never ask, single shot).
 
     Returns (steps, stop_reason) where steps is a list[StepOutcome].
     execute_fn(action, cwd) -> (argv, returncode, stdout, stderr); defaults to
@@ -319,9 +367,12 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
         own = True
     try:
         for i in range(budget):
-            outcome, _q, _c, _r = dispatch(
+            ask_continue = budget > 1 and i + 1 < budget
+            outcome, _q, _c, response = dispatch(
                 config, request, cwd, client=client,
-                min_confidence=min_confidence, history=history or None)
+                min_confidence=min_confidence, history=history or None,
+                max_steps=budget, max_history=max_history,
+                allow_continue=ask_continue)
             if workflow is not None and i < len(workflow):
                 # pinned workflow: force node, keep model's slots/flags/values
                 node = workflow[i]
@@ -358,6 +409,8 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                 return steps, f"stop: step {i+1} exited {rc}"
             if workflow is not None and i + 1 >= len(workflow):
                 return steps, "workflow complete"
+            if ask_continue and not continue_requested(response):
+                return steps, f"stop: Jev ended after step {i+1}"
     finally:
         if own:
             try:
