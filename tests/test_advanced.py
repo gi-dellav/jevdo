@@ -1,0 +1,150 @@
+"""Risk, thresholds, valued flags, multi-slot planning, confirm, sequence."""
+
+import pytest
+
+from jevdo.config import (
+    Command, EnvConfig, Flag, PathSlot, Subcommand,
+    effective_threshold, node_risk,
+)
+from jevdo.dispatcher import PlannedAction, dispatch_sequence, plan_from_answers
+from conftest import FakeChoice, FakeNoul, sample_config
+
+
+def _cmd(choice="git", conf=0.9):
+    return {"__command__": FakeChoice(choice, {choice: 0.9, "none_of_the_above": 0.1}, conf)}
+
+
+def _rich_config(**over):
+    cmds = (
+        Command(name="git", description="vcs", argv=None, risk="read", subcommands=(
+            Subcommand(name="add", description="stage",
+                       argv=("git", "add", "{path:src}"),
+                       paths=(PathSlot(name="src", kind="files"),),
+                       risk="write"),
+            Subcommand(name="reset", description="nuke",
+                       argv=("git", "reset", "--hard"), risk="destructive"),
+        )),
+        Command(name="ls", description="list", argv=("ls", "--fmt", "{value}", "{path:out}"),
+                risk="read",
+                flags=(Flag("--fmt", "fmt", ("--fmt={value}",),
+                            values=("json", "plain"),
+                            value_descriptions={"json": "machine"}),),
+                paths=(PathSlot(name="out", kind="dirs", optional=True),)),
+    )
+    kw = dict(model="jev-latest", min_confidence=0.5, timeout=60.0, commands=cmds,
+              risk_thresholds={"read": 0.5, "write": 0.7, "destructive": 0.9})
+    kw.update(over)
+    return EnvConfig(**kw)
+
+
+@pytest.fixture
+def rich():
+    return _rich_config()
+
+
+def _rich_ctx():
+    return {"candidates": {(("git.add", "src")): ["a.txt"],
+                           "git.add": ["a.txt"],
+                           (("ls", "out")): ["d"],
+                           "ls": ["d"]},
+            "cwd_files": ["a.txt"], "cwd_dirs": ["d"]}
+
+
+def test_risk_inheritance_and_threshold_resolution():
+    cfg = sample_config()
+    git = cfg.get_command("git")
+    assert node_risk(cfg, git, None) == "read"  # meta default
+    cfg2 = sample_config(default_risk="write")
+    assert node_risk(cfg2, git, None) == "write"
+    bar, src = effective_threshold(cfg2, git, None, "write")
+    assert bar == 0.5 and src == "global"
+    cfg3 = _rich_config()
+    g3 = cfg3.get_command("git")
+    add = [s for s in g3.subcommands if s.name == "add"][0]
+    bar, src = effective_threshold(cfg3, g3, add, "write")
+    assert bar == 0.7 and src == "risk write"
+    cfg4 = _rich_config()
+    cmds = list(cfg4.commands)
+    assert effective_threshold(cfg4, cmds[0], add, "write", cli_override=0.1) == (0.1, "cli --min-confidence")
+
+
+def test_write_below_risk_threshold_abstains(rich):
+    ans = (_cmd("git", 0.6)
+           | {"__subcommand__:git": FakeChoice("add", {"add": 0.9}, 0.6),
+              "path.git.add.src": FakeChoice("a.txt", {"a.txt": 0.9}, 0.6)})
+    out = plan_from_answers(rich, ans, _rich_ctx())
+    assert not out.ok and "0.70 (risk write)" in out.reason
+
+
+def test_multislot_and_valued_flag_planning(rich):
+    ans = ({"__command__": FakeChoice("ls", {"ls": 0.95}, 0.95)}
+           | {"flag.ls.--fmt": FakeNoul(0.9),
+              "flagval.ls.--fmt": FakeChoice("json", {"json": 0.9}, 0.92),
+              "path_stated.ls.out": FakeNoul(0.9),
+              "path.ls.out": FakeChoice("d", {"d": 0.9}, 0.93)})
+    out = plan_from_answers(rich, ans, _rich_ctx())
+    assert out.ok, out.reason
+    assert out.action.flag_values == {"--fmt": "json"}
+    assert out.action.paths == {"out": "d"}
+    assert out.action.risk == "read"
+
+
+def test_valued_flag_none_means_off(rich):
+    ans = ({"__command__": FakeChoice("ls", {"ls": 0.95}, 0.95)}
+           | {"flag.ls.--fmt": FakeNoul(0.9),
+              "flagval.ls.--fmt": FakeChoice("none_of_the_above", {"none_of_the_above": 0.9}, 0.9),
+              "path_stated.ls.out": FakeNoul(0.05)})
+    out = plan_from_answers(rich, ans, _rich_ctx())
+    assert out.ok and out.action.flags == () and out.action.describe() == "ls"
+
+
+def test_confirm_accept_decline(monkeypatch):
+    from jevdo import cli
+    import sys
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr("builtins.input", lambda _p: "y")
+    a = PlannedAction(command="git", subcommand="add", flags=(), paths={"src": "a"},
+                      confidence=0.8, risk="write")
+    assert cli.confirm(a, ["git", "add", "a"]) is True
+    monkeypatch.setattr("builtins.input", lambda _p: "n")
+    assert cli.confirm(a, ["git", "add", "a"]) is False
+
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False)
+    assert cli.confirm(a, ["git", "add", "a"]) is False  # fail-closed
+
+
+def test_sequence_stops_on_error():
+    cfg = sample_config()
+    calls = {"n": 0}
+
+    class FakeResp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw): return FakeResp()
+
+    def boom(action, cwd):
+        calls["n"] += 1
+        return (["pytest", "-q"], 1, "", "fail")
+
+    steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
+                                      execute_fn=boom, max_steps=3)
+    assert len(steps) == 1 and "exited 1" in reason and calls["n"] == 1
+
+
+def test_sequence_max_steps():
+    cfg = sample_config()
+
+    class FakeResp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw): return FakeResp()
+
+    def ok_exec(action, cwd):
+        return (["pytest", "-q"], 0, "ok", "")
+
+    steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
+                                      execute_fn=ok_exec, max_steps=2)
+    assert len(steps) == 2 and reason == "max_steps reached"

@@ -1,0 +1,122 @@
+[meta]
+model = "jev-latest"
+min_confidence = 0.5
+timeout = 60
+default_risk = "read"
+max_steps = 1
+command_question = "What shell task is the user asking for?"
+  [meta.risk_thresholds]
+  read = 0.5
+  write = 0.7
+  destructive = 0.9
+
+[[command]]
+name = "git"
+description = "version control operations like status, log, staging files"
+risk = "read"
+instructions_subcommand = "Which git subcommand does the request need: status, log, staging, or history search?"
+# no base argv -> subcommand-layer none_of_the_above abstains
+
+  [[command.subcommand]]
+  name = "status"
+  description = "show working tree status, e.g. 'show git status'"
+  argv = ["git", "status"]
+  risk = "read"
+
+  [[command.subcommand]]
+  name = "log"
+  description = "show commit history, e.g. 'show recent commits'"
+  argv = ["git", "log"]
+  risk = "read"
+
+    [[command.subcommand.flag]]
+    name = "--oneline"
+    description = "compact one-line-per-commit history, e.g. 'brief git history'"
+    argv_fragment = ["--oneline"]
+    question = "Does the user want compact one-line-per-commit history?"
+
+    [[command.subcommand.flag]]
+    name = "--format"
+    description = "machine-readable history format"
+    argv_fragment = ["--format={value}"]
+    values = ["json", "plain"]
+    question = "Does the request ask for a specific machine-readable history format?"
+    [command.subcommand.flag.value_descriptions]
+    json = "one JSON object per commit"
+    plain = "plain human-readable text"
+
+  [[command.subcommand]]
+  name = "add"
+  description = "stage a file for commit, e.g. 'stage readme'"
+  argv = ["git", "add", "{path:src}"]
+  risk = "write"
+
+    [[command.subcommand.path]]
+    name = "src"
+    kind = "files"
+    optional = false
+    description = "file to stage"
+    depth = 3
+    glob = "*.py"
+    question = "Which Python file does the request want to stage?"
+    stated_question = "Does the request name a specific Python file to stage?"
+
+  [[command.subcommand]]
+  name = "grep"
+  description = "search commit history, e.g. 'find commits mentioning auth'"
+  argv = ["git", "log", "--grep={value}", "{path:scope}"]
+  risk = "read"
+
+    [[command.subcommand.path]]
+    name = "scope"
+    kind = "dirs"
+    optional = true
+    description = "directory to limit the history search to"
+
+[[command]]
+name = "ls"
+description = "list directory contents, e.g. 'list files here'"
+argv = ["ls", "{path:target}"]
+risk = "read"
+
+  [[command.flag]]
+  name = "-la"
+  description = "long detailed listing including sizes and dates"
+  argv_fragment = ["-la"]
+
+  [[command.path]]
+  name = "target"
+  kind = "dirs"
+  optional = true
+  description = "directory to list"
+  depth = 2
+
+[[command]]
+name = "cp"
+description = "copy a file into a directory, e.g. 'copy readme into docs'"
+argv = ["cp", "{path:src}", "{path:dst}"]
+risk = "write"
+
+  [[command.path]]
+  name = "src"
+  kind = "files"
+  description = "source file to copy"
+  depth = 2
+
+  [[command.path]]
+  name = "dst"
+  kind = "dirs"
+  optional = true
+  description = "destination directory (defaults to current directory)"
+
+[[command]]
+name = "pytest"
+description = "run the python test suite, e.g. 'run tests'"
+argv = ["pytest", "-q"]
+risk = "read"
+min_confidence = 0.6
+
+  [[command.flag]]
+  name = "-x"
+  description = "stop after the first failure"
+  argv_fragment = ["-x"]
