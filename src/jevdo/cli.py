@@ -1,4 +1,6 @@
-"""CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]"""
+"""CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]
+
+Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes)."""
 
 from __future__ import annotations
 
@@ -9,12 +11,14 @@ import sys
 
 from jevdo.config import ConfigError, load_config
 from jevdo.dispatcher import dispatch, dispatch_sequence
+from jevdo.eval import EvalError, load_eval, run_eval
 from jevdo.executor import ExecutionError, execute, resolve_argv
 
 EXIT_OK = 0
 EXIT_CONFIG = 2
 EXIT_ABSTAIN = 3
 EXIT_EXEC_FAIL = 4
+EXIT_EVAL_FAIL = 5
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,7 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="jevdo",
         description="Jev, Do. Route a natural-language request to an allowlisted shell command.",
     )
-    p.add_argument("request", help="natural-language request, e.g. 'show git status'")
+    p.add_argument("request", nargs="?",
+                   help="natural-language request, e.g. 'show git status'")
     p.add_argument("--env", default="environment.toml", help="path to environment.toml")
     p.add_argument("--cwd", default=".", help="working dir for file candidates + execution")
     p.add_argument("--dry-run", action="store_true", help="print argv, do not execute")
@@ -34,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--stop-on-error", dest="stop_on_error", action="store_true", default=True)
     p.add_argument("--no-stop-on-error", dest="stop_on_error", action="store_false",
                    help="continue chaining after non-zero exit")
+    p.add_argument("--eval", dest="eval_file", default=None, metavar="EVAL_TOML",
+                   help="eval mode: run [[test]] cases from a toml file, "
+                   "compare planned argv to expected, never execute")
     return p
 
 
@@ -67,6 +75,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if not os.environ.get("TYPESAFE_API_KEY"):
         print("jevdo: TYPESAFE_API_KEY is not set", file=sys.stderr)
+        return EXIT_CONFIG
+
+    if args.eval_file is not None:
+        return run_eval_file(config, args)
+    if args.request is None:
+        print("jevdo: the following arguments are required: request", file=sys.stderr)
         return EXIT_CONFIG
 
     budget = args.steps if args.steps is not None else config.max_steps
@@ -192,6 +206,27 @@ def run_sequence(config, args, budget: int) -> int:
         return EXIT_OK
     print("jevdo: max_steps reached" if len(history) == budget else "jevdo: done")
     return final
+
+
+def run_eval_file(config, args) -> int:
+    """Eval mode: plan each [[test]] input via Jev, compare argv, never execute."""
+    try:
+        cases = load_eval(args.eval_file)
+    except EvalError as e:
+        print(f"jevdo: eval error: {e}", file=sys.stderr)
+        return EXIT_CONFIG
+    summary = run_eval(config, cases, args.cwd, min_confidence=args.min_confidence)
+    for r in summary.results:
+        status = "PASS" if r.passed else "FAIL"
+        if r.actual is None:
+            print(f"{status} {r.case.name}: {r.reason}")
+        else:
+            print(f"{status} {r.case.name}: + {' '.join(r.actual)}"
+                  f"  (confidence {r.confidence:.2f}"
+                  + (f", risk {r.risk}" if r.risk else "") + ")"
+                  + ("" if r.passed else f" -- {r.reason}"))
+    print(f"jevdo: eval {summary.passed}/{summary.total} passed")
+    return EXIT_OK if summary.ok else EXIT_EVAL_FAIL
 
 
 def _print_layers(outcome) -> None:

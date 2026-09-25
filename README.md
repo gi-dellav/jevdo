@@ -91,6 +91,7 @@ jevdo "stage readme"                   # -> git add ... (asks [y/N], risk write)
 jevdo "copy readme into docs"          # -> cp README.md docs
 jevdo "run tests" --steps 2            # chained: re-plans after each step
 jevdo "run tests" --min-confidence 0.8 # CLI flag wins over all config
+jevdo --eval eval.toml                 # eval harness: plans only, never runs
 ```
 
 `none_of_the_above` semantics: L1 (command) → abstain; L2 (subcommand) → run
@@ -104,6 +105,27 @@ rescanned and `{argv, returncode, stdout_tail}` appended to Jev state history.
 Stops on abstention, non-zero exit (unless `--no-stop-on-error`), decline, or
 budget. `dispatch_sequence()` in `dispatcher.py` exposes this programmatically.
 
+## Eval mode
+
+`jevdo --eval eval.toml` runs each `[[test]]` input through Jev and compares
+the planned argv to `expected` — nothing is executed, nothing prompts:
+
+```toml
+[[test]]
+name = "brief history"            # optional (default test-N), must be unique
+input = "brief git history"       # given to Jev
+expected = "git log --oneline"    # shell-parsed, compared as argv list
+
+[[test]]
+name = "nonsense abstains"
+input = "launch the rockets"
+expect_abstain = true             # pass iff Jev abstains (no expected)
+```
+
+Per-test `cwd` (relative, joined onto `--cwd`) and `min_confidence`
+overrides, plus `[meta]` defaults for both, are supported. Exit 0 when all
+pass, 5 otherwise. See `eval.toml.example`.
+
 ## Layout
 
 - `src/jevdo/config.py` – toml loading + validation, risk/threshold resolution
@@ -112,4 +134,5 @@ budget. `dispatch_sequence()` in `dispatcher.py` exposes this programmatically.
 - `src/jevdo/dispatcher.py` – `system_one` call, branch reader, `dispatch_sequence`
 - `src/jevdo/executor.py` – strict multi-slot/`{value}` resolution + `subprocess`
 - `src/jevdo/cli.py` – `jevdo` entrypoint, confirm prompt, step transcript
-- `tests/` – 56 tests (`PYTHONPATH=src:tests pytest`)
+- `src/jevdo/eval.py` – `--eval` toml loading + no-exec comparison harness
+- `tests/` – 68 tests (`PYTHONPATH=src:tests pytest`)

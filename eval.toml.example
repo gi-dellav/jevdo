@@ -1,0 +1,37 @@
+[meta]
+# optional defaults for every [[test]] below
+# cwd = "."
+# min_confidence = 0.5
+
+[[test]]
+name = "status"
+input = "show git status"
+expected = "git status"
+
+[[test]]
+name = "brief history"
+input = "brief git history"
+expected = "git log --oneline"
+
+[[test]]
+name = "machine history"
+input = "show recent commits as json"
+expected = "git log --format=json"
+
+[[test]]
+name = "stage readme"
+input = "stage the readme python file"
+expected = "git add README.py"
+
+[[test]]
+name = "nonsense abstains"
+input = "launch the rockets to mars"
+expect_abstain = true
+
+# per-test overrides (both optional):
+# [[test]]
+# name = "other dir"
+# input = "list files here"
+# expected = "ls srcdir"
+# cwd = "subdir"            # joined onto --cwd
+# min_confidence = 0.8      # wins over CLI --min-confidence for this test
