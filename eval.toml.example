@@ -25,6 +25,11 @@ input = "stage the readme python file"
 expected = "git add README.py"
 
 [[test]]
+name = "stage then status"
+input = "stage readme then show status"
+expected = ["git add README.py", "git status"]   # multi-step: max_steps = 2
+
+[[test]]
 name = "nonsense abstains"
 input = "launch the rockets to mars"
 expect_abstain = true

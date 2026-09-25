@@ -1,9 +1,9 @@
 """CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]
-  [--max-steps N] [--max-history N] [--provider typesafe|openrouter]
-  [--base-url URL]
+  [--max-steps N] [--max-history N] [--temperature T] [--log PATH]
+  [--provider typesafe|openrouter] [--base-url URL]
 
-Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes,
-always max_steps = 1)."""
+Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes; a
+string `expected` runs max_steps = 1, an array runs len(expected) steps)."""
 
 from __future__ import annotations
 
@@ -12,9 +12,10 @@ import dataclasses
 import sys
 
 from jevdo.config import ConfigError, load_config
-from jevdo.dispatcher import continue_requested, dispatch, dispatch_sequence
-from jevdo.eval import EvalError, load_eval, run_eval
+from jevdo.dispatcher import continue_info, continue_requested, dispatch
+from jevdo.eval import EvalError, _join, load_eval, run_eval
 from jevdo.executor import ExecutionError, execute, resolve_argv
+from jevdo.runlog import JsonlLogger, eval_event, plan_event, result_event
 
 EXIT_OK = 0
 EXIT_CONFIG = 2
@@ -64,6 +65,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-history", type=int, default=None, metavar="N",
                    help="max history entries sent back to Jev when chaining "
                         "(default: meta.max_history; 0 sends none)")
+    p.add_argument("--temperature", type=float, default=None, metavar="T",
+                   help="sampling temperature passed to Jev in extra_body "
+                        "(default: meta.temperature)")
+    p.add_argument("--log", dest="log_path", default=None, metavar="PATH",
+                   help="opt-in JSONL run log: append plan/result events to PATH")
     p.add_argument("--stop-on-error", dest="stop_on_error", action="store_true", default=True)
     p.add_argument("--no-stop-on-error", dest="stop_on_error", action="store_false",
                    help="continue chaining after non-zero exit")
@@ -110,6 +116,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.max_history is not None and args.max_history < 0:
         print("jevdo: --max-history must be >= 0", file=sys.stderr)
         return EXIT_CONFIG
+    if args.temperature is not None and not 0 <= args.temperature <= 2:
+        print("jevdo: --temperature must be in [0, 2]", file=sys.stderr)
+        return EXIT_CONFIG
     try:
         config = apply_cli_overrides(config, args)
     except ConfigError as e:
@@ -123,53 +132,76 @@ def main(argv: list[str] | None = None) -> int:
               " (see README for OpenRouter setup)", file=sys.stderr)
         return EXIT_CONFIG
 
-    if args.eval_file is not None:
-        return run_eval_file(config, args)
-    if args.request is None:
-        print("jevdo: the following arguments are required: request", file=sys.stderr)
-        return EXIT_CONFIG
-
-    budget = args.max_steps if args.max_steps is not None else config.max_steps
-    if budget > 1:
-        return run_sequence(config, args, budget)
-
+    logger = JsonlLogger(args.log_path) if args.log_path else None
     try:
-        outcome, _questions, _ctx, _resp = dispatch(
-            config, args.request, args.cwd, min_confidence=args.min_confidence)
-    except ConfigError as e:
-        print(f"jevdo: config error: {e}", file=sys.stderr)
-        return EXIT_CONFIG
-    except ValueError as e:
-        print(f"jevdo: cannot build questions: {e}", file=sys.stderr)
-        return EXIT_CONFIG
-    except Exception as e:
-        print(f"jevdo: Jev call failed: {e}", file=sys.stderr)
-        return EXIT_ABSTAIN
+        if args.eval_file is not None:
+            return run_eval_file(config, args, logger=logger)
+        if args.request is None:
+            print("jevdo: the following arguments are required: request",
+                  file=sys.stderr)
+            return EXIT_CONFIG
 
-    if args.show_probs:
-        _print_layers(outcome)
-    if not outcome.ok or outcome.action is None:
-        print(f"jevdo: abstaining: {outcome.reason} (confidence {outcome.confidence:.2f})",
-              file=sys.stderr)
-        return EXIT_ABSTAIN
-    return run_action(config, args, outcome.action)
+        budget = args.max_steps if args.max_steps is not None else config.max_steps
+        if budget > 1:
+            return run_sequence(config, args, budget, logger=logger)
+
+        try:
+            outcome, _questions, context, response = dispatch(
+                config, args.request, args.cwd,
+                min_confidence=args.min_confidence,
+                max_history=args.max_history, max_steps=budget,
+                temperature=args.temperature)
+        except ConfigError as e:
+            print(f"jevdo: config error: {e}", file=sys.stderr)
+            return EXIT_CONFIG
+        except ValueError as e:
+            print(f"jevdo: cannot build questions: {e}", file=sys.stderr)
+            return EXIT_CONFIG
+        except Exception as e:
+            print(f"jevdo: Jev call failed: {e}", file=sys.stderr)
+            return EXIT_ABSTAIN
+
+        if logger is not None:
+            logger.log(plan_event(
+                1, args.request, args.cwd, outcome, context,
+                continue_asked=False, continue_value=None,
+                max_steps=budget, max_history=args.max_history))
+        if args.show_probs:
+            _print_layers(outcome)
+        if not outcome.ok or outcome.action is None:
+            print(f"jevdo: abstaining: {outcome.reason} "
+                  f"(confidence {outcome.confidence:.2f})", file=sys.stderr)
+            if logger is not None:
+                logger.log(result_event(1, error=outcome.reason,
+                                        stop_reason=outcome.reason))
+            return EXIT_ABSTAIN
+        return run_action(config, args, outcome.action, logger=logger, step=1)
+    finally:
+        if logger is not None:
+            logger.close()
 
 
-def run_action(config, args, action) -> int:
+def run_action(config, args, action, logger=None, step: int = 1) -> int:
     try:
         preview = resolve_argv(config, action, args.cwd)
     except ExecutionError as e:
         print(f"jevdo: refused: {e}", file=sys.stderr)
+        if logger is not None:
+            logger.log(result_event(step, error=str(e)))
         return EXIT_ABSTAIN
     if args.dry_run:
         print(f"+ {' '.join(preview)}  (confidence {action.confidence:.2f}, "
               f"risk {action.risk}) [dry-run]")
+        if logger is not None:
+            logger.log(result_event(step, preview, dry_run=True))
         return EXIT_OK
     if action.risk in ("write", "destructive"):
         print(f"+ {' '.join(preview)}  (confidence {action.confidence:.2f}, "
               f"risk {action.risk})")
         if not confirm(action, preview):
             print("jevdo: declined by user", file=sys.stderr)
+            if logger is not None:
+                logger.log(result_event(step, preview, declined=True))
             return EXIT_ABSTAIN
     else:
         print(f"+ {' '.join(preview)}  (confidence {action.confidence:.2f})")
@@ -178,15 +210,20 @@ def run_action(config, args, action) -> int:
         result = execute(config, action, args.cwd)
     except ExecutionError as e:
         print(f"jevdo: execution refused/failed: {e}", file=sys.stderr)
+        if logger is not None:
+            logger.log(result_event(step, preview, error=str(e)))
         return EXIT_EXEC_FAIL
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
         print(result.stderr, end="", file=sys.stderr)
+    if logger is not None:
+        logger.log(result_event(step, preview, returncode=result.returncode,
+                                stdout=result.stdout, stderr=result.stderr))
     return EXIT_OK if result.returncode == 0 else EXIT_EXEC_FAIL
 
 
-def run_sequence(config, args, budget: int) -> int:
+def run_sequence(config, args, budget: int, logger=None) -> int:
     """Plan+confirm+execute loop; Jev decides after each step whether to continue.
 
     `budget` is the upper bound. With budget == 1 no `__continue__` gate is
@@ -197,17 +234,24 @@ def run_sequence(config, args, budget: int) -> int:
     for i in range(budget):
         ask_continue = budget > 1 and i + 1 < budget
         try:
-            outcome, _q, _c, response = dispatch(
+            outcome, _q, context, response = dispatch(
                 config, args.request, args.cwd,
                 min_confidence=args.min_confidence, history=history or None,
                 max_steps=budget, max_history=args.max_history,
-                allow_continue=ask_continue)
+                allow_continue=ask_continue, temperature=args.temperature)
         except (ConfigError, ValueError) as e:
             print(f"jevdo: step {i+1}: {e}", file=sys.stderr)
             return EXIT_CONFIG if isinstance(e, ConfigError) else EXIT_ABSTAIN
         except Exception as e:
             print(f"jevdo: Jev call failed at step {i+1}: {e}", file=sys.stderr)
             return EXIT_ABSTAIN
+        if logger is not None:
+            logger.log(plan_event(
+                i + 1, args.request, args.cwd, outcome, context,
+                continue_asked=ask_continue,
+                continue_value=continue_info(response),
+                max_steps=budget, max_history=args.max_history,
+                history_len=len(history)))
         if args.show_probs:
             print(f"# step {i+1}/{budget}:")
             _print_layers(outcome)
@@ -215,19 +259,29 @@ def run_sequence(config, args, budget: int) -> int:
             if i == 0:
                 print(f"jevdo: abstaining: {outcome.reason} "
                       f"(confidence {outcome.confidence:.2f})", file=sys.stderr)
+                if logger is not None:
+                    logger.log(result_event(i + 1, error=outcome.reason,
+                                            stop_reason=outcome.reason))
                 return EXIT_ABSTAIN
             print(f"jevdo: stop: {outcome.reason}")
+            if logger is not None:
+                logger.log(result_event(i + 1, error=outcome.reason,
+                                        stop_reason=outcome.reason))
             return final
         action = outcome.action
         try:
             preview = resolve_argv(config, action, args.cwd)
         except ExecutionError as e:
             print(f"jevdo: step {i+1} refused: {e}", file=sys.stderr)
+            if logger is not None:
+                logger.log(result_event(i + 1, error=str(e)))
             return EXIT_ABSTAIN
         tag = f"step {i+1}/{budget}"
         if args.dry_run:
             print(f"{tag}: + {' '.join(preview)}  (confidence {action.confidence:.2f}, "
                   f"risk {action.risk}) [dry-run]")
+            if logger is not None:
+                logger.log(result_event(i + 1, preview, dry_run=True))
             if ask_continue and not continue_requested(response):
                 print(f"jevdo: done after step {i+1} (dry-run)")
                 return EXIT_OK
@@ -239,6 +293,8 @@ def run_sequence(config, args, budget: int) -> int:
             confirmed = confirm(action, preview)
             if not confirmed:
                 print("jevdo: declined by user", file=sys.stderr)
+                if logger is not None:
+                    logger.log(result_event(i + 1, preview, declined=True))
                 return EXIT_ABSTAIN
         else:
             print(f"{tag}: + {' '.join(preview)}  (confidence {action.confidence:.2f})")
@@ -246,11 +302,17 @@ def run_sequence(config, args, budget: int) -> int:
             result = execute(config, action, args.cwd)
         except ExecutionError as e:
             print(f"jevdo: step {i+1} failed: {e}", file=sys.stderr)
+            if logger is not None:
+                logger.log(result_event(i + 1, preview, error=str(e)))
             return EXIT_EXEC_FAIL
         if result.stdout:
             print(result.stdout, end="")
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr)
+        if logger is not None:
+            logger.log(result_event(i + 1, preview,
+                                    returncode=result.returncode,
+                                    stdout=result.stdout, stderr=result.stderr))
         history.append({"step": i + 1, "argv": preview, "returncode": result.returncode,
                         "stdout_tail": result.stdout[-2000:], "stderr_tail": result.stderr[-2000:]})
         if result.returncode != 0:
@@ -267,20 +329,24 @@ def run_sequence(config, args, budget: int) -> int:
     return final
 
 
-def run_eval_file(config, args) -> int:
+def run_eval_file(config, args, logger=None) -> int:
     """Eval mode: plan each [[test]] input via Jev, compare argv, never execute."""
     try:
         cases = load_eval(args.eval_file)
     except EvalError as e:
         print(f"jevdo: eval error: {e}", file=sys.stderr)
         return EXIT_CONFIG
-    summary = run_eval(config, cases, args.cwd, min_confidence=args.min_confidence)
+    summary = run_eval(config, cases, args.cwd, min_confidence=args.min_confidence,
+                       temperature=args.temperature)
     for r in summary.results:
+        if logger is not None:
+            logger.log(eval_event(r.case, r))
         status = "PASS" if r.passed else "FAIL"
         if r.actual is None:
             print(f"{status} {r.case.name}: {r.reason}")
         else:
-            print(f"{status} {r.case.name}: + {' '.join(r.actual)}"
+            cmds = " ; ".join(_join(a) for a in r.actual)
+            print(f"{status} {r.case.name}: + {cmds}"
                   f"  (confidence {r.confidence:.2f}"
                   + (f", risk {r.risk}" if r.risk else "") + ")"
                   + ("" if r.passed else f" -- {r.reason}"))

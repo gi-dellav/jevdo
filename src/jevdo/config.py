@@ -13,6 +13,7 @@ base_url = "https://..."    # optional override; wins over provider default and
 default_risk = "read"       # read | write | destructive
 max_steps = 1               # 1..10 upper bound; >1 lets Jev decide to continue
 max_history = 5             # optional; cap history entries sent back to Jev
+temperature = 0.0           # optional; passed to Jev via extra_body
 command_question = "..."    # optional override for the L1 question text
   [meta.risk_thresholds]
   read = 0.5
@@ -165,6 +166,7 @@ class EnvConfig:
     risk_thresholds: dict = field(default_factory=dict)
     max_steps: int = 1
     max_history: int | None = None
+    temperature: float | None = None
     command_question: str | None = None
     provider: str = "typesafe"
     base_url: str | None = None
@@ -582,6 +584,11 @@ def load_config(path: str) -> EnvConfig:
         if (not isinstance(max_history, int) or isinstance(max_history, bool)
                 or max_history < 0):
             raise ConfigError("meta.max_history must be a non-negative integer")
+    temperature = meta.get("temperature")
+    if temperature is not None:
+        if (not isinstance(temperature, (int, float))
+                or isinstance(temperature, bool) or not 0 <= temperature <= 2):
+            raise ConfigError("meta.temperature must be a number in [0, 2]")
     command_question = None
     if meta.get("command_question") is not None:
         command_question = _opt_instruction(meta, "command_question", "meta")
@@ -616,6 +623,7 @@ def load_config(path: str) -> EnvConfig:
         timeout=float(timeout), commands=tuple(commands),
         default_risk=default_risk, risk_thresholds=risk_thresholds,
         max_steps=max_steps, max_history=max_history,
+        temperature=(float(temperature) if temperature is not None else None),
         command_question=command_question,
         provider=provider, base_url=base_url,
     )

@@ -279,32 +279,40 @@ def _clip_history(history: list, max_history: int | None) -> list:
     return list(history[-max_history:])
 
 
+def continue_info(response) -> float | None:
+    """Raw `__continue__` Noul probability, or None if absent/malformed."""
+    answers = getattr(response, "answers", None)
+    if not isinstance(answers, dict):
+        return None
+    ans = answers.get(CONTINUE_QID)
+    if ans is None or getattr(ans, "type", None) != "noul":
+        return None
+    try:
+        return float(ans.noul)
+    except (TypeError, ValueError):
+        return None
+
+
 def continue_requested(response) -> bool:
     """True iff Jev answered the `__continue__` Noul affirmatively.
 
     Missing/abstaining/malformed answer => False (fail-closed).
     """
-    answers = getattr(response, "answers", None)
-    if not isinstance(answers, dict):
-        return False
-    ans = answers.get(CONTINUE_QID)
-    if ans is None or getattr(ans, "type", None) != "noul":
-        return False
-    try:
-        return float(ans.noul) >= PATH_YES
-    except (TypeError, ValueError):
-        return False
+    v = continue_info(response)
+    return v is not None and v >= PATH_YES
 
 
 def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
              min_confidence: float | None = None, history: list | None = None,
              max_steps: int | None = None, max_history: int | None = None,
-             allow_continue: bool | None = None):
+             allow_continue: bool | None = None,
+             temperature: float | None = None):
     """Live dispatch: build state+questions, call Jev once, plan. Returns
     (PlanOutcome, questions, context, response).
 
     allow_continue adds the `__continue__` gate; defaults to (budget > 1).
     max_history caps history entries sent to Jev; defaults to config.max_history.
+    temperature defaults to config.temperature and rides in extra_body.
     """
     from jevdo.client import create_client
 
@@ -314,6 +322,7 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
     if allow_continue is None:
         allow_continue = budget > 1
     cap = config.max_history if max_history is None else max_history
+    temp = config.temperature if temperature is None else temperature
     questions, context = build_questions(config, cwd, allow_continue=allow_continue)
     state = {
         "request": request,
@@ -323,12 +332,14 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
     hist = _clip_history(history or [], cap)
     if hist:
         state["history"] = hist
+    extra_body = {"temperature": temp} if temp is not None else None
     own = False
     if client is None:
         client = create_client(config)
         own = True
     try:
-        response = client.system_one(state=state, questions=questions, model=config.model)
+        response = client.system_one(state=state, questions=questions,
+                                     model=config.model, extra_body=extra_body)
     finally:
         if own:
             try:
@@ -343,7 +354,8 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
 def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                       client=None, min_confidence: float | None = None,
                       max_steps: int | None = None, max_history: int | None = None,
-                      execute_fn=None, workflow: list[str] | None = None):
+                      temperature: float | None = None, execute_fn=None,
+                      workflow: list[str] | None = None, logger=None):
     """Chained dispatch: plan -> execute -> refresh -> repeat.
 
     Each step includes a `__continue__` Noul so Jev decides whether to chain
@@ -353,6 +365,7 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
     Returns (steps, stop_reason) where steps is a list[StepOutcome].
     execute_fn(action, cwd) -> (argv, returncode, stdout, stderr); defaults to
     jevdo.executor.execute (real run). stop_on_error defaults True.
+    logger, when given, is a runlog.JsonlLogger receiving plan/result events.
     """
     from jevdo import executor as _executor
 
@@ -368,11 +381,19 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
     try:
         for i in range(budget):
             ask_continue = budget > 1 and i + 1 < budget
-            outcome, _q, _c, response = dispatch(
+            outcome, _q, context, response = dispatch(
                 config, request, cwd, client=client,
                 min_confidence=min_confidence, history=history or None,
                 max_steps=budget, max_history=max_history,
-                allow_continue=ask_continue)
+                allow_continue=ask_continue, temperature=temperature)
+            if logger is not None:
+                from jevdo import runlog
+                logger.log(runlog.plan_event(
+                    i + 1, request, cwd, outcome, context,
+                    continue_asked=ask_continue,
+                    continue_value=continue_info(response),
+                    max_steps=budget, max_history=max_history,
+                    history_len=len(history)))
             if workflow is not None and i < len(workflow):
                 # pinned workflow: force node, keep model's slots/flags/values
                 node = workflow[i]
@@ -388,9 +409,12 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                 if not outcome.ok:
                     return steps, f"workflow step {i+1} abstained: {outcome.reason}"
             if not outcome.ok or outcome.action is None:
-                if i == 0:
-                    return steps, f"abstained: {outcome.reason}"
-                return steps, f"stop: {outcome.reason}"
+                reason = (f"abstained: {outcome.reason}" if i == 0
+                          else f"stop: {outcome.reason}")
+                if logger is not None:
+                    logger.log(runlog.result_event(i + 1, error=outcome.reason,
+                                                   stop_reason=reason))
+                return steps, reason
             action = outcome.action
             if execute_fn is not None:
                 argv, rc, out, err = execute_fn(action, cwd)
@@ -405,6 +429,9 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                 "stdout_tail": out[-2000:],
                 "stderr_tail": err[-2000:],
             })
+            if logger is not None:
+                logger.log(runlog.result_event(i + 1, argv, returncode=rc,
+                                               stdout=out, stderr=err))
             if rc != 0:
                 return steps, f"stop: step {i+1} exited {rc}"
             if workflow is not None and i + 1 >= len(workflow):

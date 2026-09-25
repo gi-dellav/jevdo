@@ -202,3 +202,14 @@ def test_max_history_parsing(tmp_path):
     with pytest.raises(ConfigError, match="non-negative integer"):
         load_config(_write(tmp_path, BASE.replace(
             'model = "jev-latest"', 'model = "jev-latest"\nmax_history = true')))
+
+
+def test_temperature_parsing(tmp_path):
+    cfg = load_config(_write(tmp_path, BASE))
+    assert cfg.temperature is None
+    cfg2 = load_config(_write(tmp_path, BASE.replace(
+        'model = "jev-latest"', 'model = "jev-latest"\ntemperature = 0.7')))
+    assert cfg2.temperature == 0.7
+    with pytest.raises(ConfigError, match="temperature"):
+        load_config(_write(tmp_path, BASE.replace(
+            'model = "jev-latest"', 'model = "jev-latest"\ntemperature = 3')))

@@ -50,6 +50,7 @@ timeout = 60
 default_risk = "read"     # read | write | destructive
 max_steps = 1             # 1..10 upper bound; >1 lets Jev decide to continue
 max_history = 5           # optional; cap history entries sent back to Jev
+temperature = 0.0         # optional; sampling temperature (extra_body)
 command_question = "What shell task is the user asking for?"
   [meta.risk_thresholds]
   read = 0.5
@@ -117,6 +118,8 @@ jevdo "copy readme into docs"          # -> cp README.md docs
 jevdo "run tests" --max-steps 3        # dynamic chaining: Jev decides each step
 jevdo "run tests" --max-steps 1        # single shot (never asks to continue)
 jevdo "run tests" --max-history 2      # send back at most 2 prior steps
+jevdo "run tests" --temperature 0.2    # sampling temperature (extra_body)
+jevdo "run tests" --log run.jsonl      # opt-in structured JSONL run log
 jevdo "run tests" --min-confidence 0.8 # CLI flag wins over all config
 jevdo "run tests" --provider openrouter --dry-run  # one-shot OpenRouter routing
 jevdo --eval eval.toml                 # eval harness: plans only, never runs
@@ -152,15 +155,31 @@ input = "brief git history"       # given to Jev
 expected = "git log --oneline"    # shell-parsed, compared as argv list
 
 [[test]]
+name = "stage then status"        # multi-step: expected is an array
+input = "stage readme then show status"
+expected = ["git add README.md", "git status"]   # max_steps = len(expected)
+
+[[test]]
 name = "nonsense abstains"
 input = "launch the rockets"
 expect_abstain = true             # pass iff Jev abstains (no expected)
 ```
 
 Per-test `cwd` (relative, joined onto `--cwd`) and `min_confidence`
-overrides, plus `[meta]` defaults for both, are supported. Every eval case is
-planned with `max_steps = 1` (no `__continue__` gate, never chains). Exit 0
-when all pass, 5 otherwise. See `eval.toml.example`.
+overrides, plus `[meta]` defaults for both, are supported. A string
+`expected` runs single-shot (`max_steps = 1`, no `__continue__` gate); an
+array runs `max_steps = len(expected)` and every planned step's argv must
+match the matching entry, so Jev must not stop early. Exit 0 when all pass,
+5 otherwise. See `eval.toml.example`.
+
+## Run logging
+
+`--log PATH` (opt-in) appends one JSON object per line. Interactive runs emit
+a `plan` event (state summary, node, flags, paths, confidence, risk,
+threshold/threshold_source, per-layer decisions, continue gate) followed by a
+`result` event (resolved argv, dry-run/declined/error, returncode, stdout,
+stderr) for each step. Eval mode emits one `eval` event per `[[test]]`.
+Nothing is written without `--log`; the file is opened in append mode.
 
 ## Layout
 
@@ -172,4 +191,5 @@ when all pass, 5 otherwise. See `eval.toml.example`.
 - `src/jevdo/executor.py` – strict multi-slot/`{value}` resolution + `subprocess`
 - `src/jevdo/cli.py` – `jevdo` entrypoint, confirm prompt, step transcript
 - `src/jevdo/eval.py` – `--eval` toml loading + no-exec comparison harness
-- `tests/` – 88 tests (`PYTHONPATH=src:tests pytest`)
+- `src/jevdo/runlog.py` – opt-in JSONL run logging (`--log`)
+- `tests/` – 105 tests (`PYTHONPATH=src:tests pytest`)

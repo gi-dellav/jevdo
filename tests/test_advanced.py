@@ -306,3 +306,127 @@ def test_cli_max_steps_one_never_asks_continue(monkeypatch, config):
                             stdout="", stderr=""))
     args = _cli_args("run tests", "--max-steps", "1")
     assert cli.run_sequence(config, args, 1) == cli.EXIT_OK
+
+
+def test_dispatch_passes_temperature(config, tmp_path):
+    seen = {}
+
+    class Resp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw):
+            seen.clear()
+            seen.update(kw)
+            return Resp()
+
+    dispatch(config, "run tests", str(tmp_path), client=FakeClient(),
+             temperature=0.3)
+    assert seen["extra_body"] == {"temperature": 0.3}
+
+    dispatch(config, "run tests", str(tmp_path), client=FakeClient())
+    assert seen["extra_body"] is None
+
+    import dataclasses
+    cfg = dataclasses.replace(config, temperature=0.15)
+    dispatch(cfg, "run tests", str(tmp_path), client=FakeClient())
+    assert seen["extra_body"] == {"temperature": 0.15}
+
+
+def test_sequence_logs_plan_and_result(tmp_path):
+    import json
+
+    from jevdo.runlog import JsonlLogger
+
+    cfg = sample_config()
+
+    class Resp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99),
+                   "__continue__": FakeNoul(0.9)}
+
+    class FakeClient:
+        def system_one(self, **kw): return Resp()
+
+    def ok_exec(action, cwd):
+        return (["pytest", "-q"], 0, "out", "")
+
+    path = tmp_path / "run.jsonl"
+    with JsonlLogger(str(path)) as log:
+        steps, reason = dispatch_sequence(
+            cfg, "run tests", ".", client=FakeClient(), execute_fn=ok_exec,
+            max_steps=2, logger=log)
+    assert len(steps) == 2
+    events = [json.loads(line) for line in path.read_text().splitlines()]
+    assert [e["type"] for e in events] == ["plan", "result", "plan", "result"]
+    assert events[0]["continue_asked"] is True
+    assert events[0]["continue"] == 0.9
+    assert events[2]["continue_asked"] is False
+    assert events[1]["argv"] == ["pytest", "-q"]
+    assert events[1]["returncode"] == 0 and events[1]["stdout"] == "out"
+
+
+def test_cli_single_run_writes_jsonl_log(monkeypatch, tmp_path):
+    import json
+
+    from jevdo import cli
+    from jevdo.dispatcher import PlanOutcome
+    from jevdo.executor import ExecutionResult
+
+    env = tmp_path / "environment.toml"
+    env.write_text('[meta]\nmodel = "jev-latest"\n' + """\
+[[command]]
+name = "pytest"
+description = "tests"
+argv = ["pytest", "-q"]
+""")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "x")
+
+    def fake_dispatch(cfg, request, cwd=".", **kw):
+        a = PlannedAction(command="pytest", subcommand=None, confidence=0.9,
+                          risk="read")
+        return PlanOutcome(True, a, "ok", 0.9), {}, {"cwd_files": [], "cwd_dirs": []}, object()
+
+    monkeypatch.setattr(cli, "dispatch", fake_dispatch)
+    monkeypatch.setattr(cli, "execute",
+                        lambda cfg, a, cwd: ExecutionResult(
+                            argv=["pytest", "-q"], returncode=0,
+                            stdout="ok", stderr=""))
+    logp = tmp_path / "run.jsonl"
+    rc = cli.main(["--env", str(env), "--cwd", str(tmp_path),
+                   "--log", str(logp), "run tests"])
+    assert rc == cli.EXIT_OK
+    events = [json.loads(line) for line in logp.read_text().splitlines()]
+    assert [e["type"] for e in events] == ["plan", "result"]
+    assert events[0]["command"] == "pytest" and events[0]["ok"] is True
+    assert events[1]["argv"] == ["pytest", "-q"] and events[1]["returncode"] == 0
+
+
+def test_cli_temperature_flag_passed(monkeypatch, tmp_path):
+    from jevdo import cli
+    from jevdo.dispatcher import PlanOutcome
+    from jevdo.executor import ExecutionResult
+
+    env = tmp_path / "environment.toml"
+    env.write_text('[meta]\nmodel = "jev-latest"\n' + """\
+[[command]]
+name = "pytest"
+description = "tests"
+argv = ["pytest", "-q"]
+""")
+    monkeypatch.setenv("TYPESAFE_API_KEY", "x")
+    seen = {}
+
+    def fake_dispatch(cfg, request, cwd=".", **kw):
+        seen["temperature"] = kw.get("temperature")
+        a = PlannedAction(command="pytest", subcommand=None, confidence=0.9,
+                          risk="read")
+        return PlanOutcome(True, a, "ok", 0.9), {}, {}, object()
+
+    monkeypatch.setattr(cli, "dispatch", fake_dispatch)
+    monkeypatch.setattr(cli, "execute",
+                        lambda cfg, a, cwd: ExecutionResult(
+                            argv=["pytest", "-q"], returncode=0,
+                            stdout="", stderr=""))
+    rc = cli.main(["--env", str(env), "--cwd", str(tmp_path),
+                   "--temperature", "0.4", "run tests"])
+    assert rc == cli.EXIT_OK and seen["temperature"] == 0.4
