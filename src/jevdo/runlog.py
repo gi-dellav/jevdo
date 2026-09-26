@@ -51,8 +51,10 @@ def _action_fields(action) -> dict:
 
 def plan_event(step: int, request: str, cwd: str, outcome, context=None, *,
                continue_asked: bool = False, continue_value: float | None = None,
+               continue_threshold: float | None = None,
+               continue_threshold_source: str | None = None,
                max_steps: int | None = None, max_history: int | None = None,
-               history_len: int = 0) -> dict:
+               history_len: int = 0, repeat_retry: bool = False) -> dict:
     """Build a ``plan`` event from a PlanOutcome."""
     ev = {
         "type": "plan",
@@ -65,9 +67,12 @@ def plan_event(step: int, request: str, cwd: str, outcome, context=None, *,
         "confidence": outcome.confidence,
         "continue_asked": continue_asked,
         "continue": continue_value,
+        "continue_threshold": continue_threshold,
+        "continue_threshold_source": continue_threshold_source,
         "max_steps": max_steps,
         "max_history": max_history,
         "history_len": history_len,
+        "repeat_retry": repeat_retry,
     }
     ev.update(_action_fields(outcome.action))
     if context:

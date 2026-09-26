@@ -148,8 +148,11 @@ def test_sequence_max_steps():
     def ok_exec(action, cwd):
         return (["pytest", "-q"], 0, "ok", "")
 
+    # repeat_guard=False: canned fakes pin identical plans across steps;
+    # the P2 anti-repeat retry only fires on live runs (guard on).
     steps, reason = dispatch_sequence(cfg, "run tests", ".", client=FakeClient(),
-                                      execute_fn=ok_exec, max_steps=2)
+                                      execute_fn=ok_exec, max_steps=2,
+                                      repeat_guard=False)
     assert len(steps) == 2 and reason == "max_steps reached"
 
 
@@ -229,6 +232,140 @@ def test_continue_requested_fail_closed():
     assert continue_requested(Resp(None)) is False
 
 
+def test_continue_requested_honors_threshold():
+    class Resp:
+        def __init__(self, answers): self.answers = answers
+
+    ans = {"__continue__": FakeNoul(0.47)}
+    assert continue_requested(Resp(ans)) is False  # default 0.5
+    assert continue_requested(Resp(ans), 0.4) is True
+    assert continue_requested(Resp(ans), 0.5) is False
+
+
+def test_history_entry_carries_node_and_describe():
+    from jevdo.dispatcher import history_entry
+    a = PlannedAction(command="ruff", subcommand="check",
+                      paths={"target": "src/app.py"},
+                      confidence=0.9, risk="read")
+    h = history_entry(2, a, ["ruff", "check", "src/app.py"], 0, "ok", "")
+    assert h["step"] == 2 and h["node"] == "ruff.check"
+    assert h["describe"] == "ruff check src/app.py"
+    assert h["argv"] == ["ruff", "check", "src/app.py"]
+    assert h["returncode"] == 0
+
+
+def test_dispatch_sends_step_and_history_state(config, tmp_path):
+    seen = {}
+
+    class Resp:
+        answers = {"__command__": FakeChoice("pytest", {"pytest": 1.0}, 0.99)}
+
+    class FakeClient:
+        def system_one(self, **kw):
+            seen["state"] = kw["state"]
+            seen["questions"] = kw["questions"]
+            return Resp()
+
+    hist = [{"step": 1, "node": "git.add", "describe": "git add a",
+             "argv": ["git", "add", "a"], "returncode": 0,
+             "stdout_tail": "", "stderr_tail": ""}]
+    dispatch(config, "run tests", str(tmp_path), client=FakeClient(),
+             history=hist, max_steps=4, max_history=5, step_index=1)
+    assert seen["state"]["step"] == 2
+    assert seen["state"]["max_steps"] == 4
+    assert seen["state"]["history"] == hist
+    assert "step 2 of at most 4" in seen["questions"]["__command__"].instructions
+
+
+def test_repeat_guard_retries_once_then_stops(config, tmp_path):
+    """P2: identical step-2 argv triggers one nudged retry; a second repeat
+    stops honestly without executing a duplicate."""
+    import types
+
+    from jevdo.dispatcher import PlanOutcome
+
+    plans = iter([
+        ("pytest", None, 0.9),   # step 1
+        ("pytest", None, 0.9),   # step 2: repeats step 1
+        ("pytest", None, 0.9),   # retry: still repeats
+    ])
+    seen_hints = []
+
+    class FakeClient:
+        def system_one(self, **kw):
+            if "hint" in kw.get("state", {}):
+                seen_hints.append(kw["state"]["hint"])
+            cmd, sub, conf = next(plans)
+            a = PlannedAction(command=cmd, subcommand=sub, confidence=conf,
+                              risk="read")
+            answers = {"__command__": FakeChoice(cmd, {cmd: 1.0}, conf),
+                       "__continue__": FakeNoul(0.9)}
+            return types.SimpleNamespace(answers=answers)
+
+    def ok_exec(action, cwd):
+        return (["pytest", "-q"], 0, "ok", "")
+
+    steps, reason = dispatch_sequence(
+        config, "run tests", str(tmp_path), client=FakeClient(),
+        execute_fn=ok_exec, max_steps=3, repeat_guard=True)
+    assert len(steps) == 2
+    assert "repeats step 1" in reason
+    assert len(seen_hints) == 1  # exactly one retry with the nudge
+
+
+def test_repeat_guard_accepts_redirected_retry(config, tmp_path):
+    """P2: when the retry plans a *different* argv, it is executed and kept."""
+    import types
+
+    script = iter([
+        # (command choice, subcommand choice, planned node, continue noul)
+        ("ruff", "check", "ruff.check", 0.9),    # step 1
+        ("ruff", "check", "ruff.check", 0.9),    # step 2: repeats...
+        ("ruff", "format", "ruff.format", 0.9),  # retry: switches node
+    ])
+
+    class FakeClient:
+        def system_one(self, **kw):
+            cmd, sub, node, conf = next(script)
+            answers = {
+                "__command__": FakeChoice(cmd, {cmd: 1.0}, conf),
+                f"__subcommand__:{cmd}": FakeChoice(
+                    sub, {sub: 1.0}, conf),
+                "__continue__": FakeNoul(0.9),
+            }
+            FakeClient.last_node.append(node)
+            return types.SimpleNamespace(answers=answers)
+    FakeClient.last_node = []
+
+    def scripted_exec(action, cwd):
+        # resolve the argv the model *would* have planned on this call:
+        # FakeClient answers carry no slots, so map node -> canned argv.
+        node = FakeClient.last_node[-1]
+        argv = {"ruff.check": ["ruff", "check"],
+                "ruff.format": ["ruff", "format", "--check"]}[node]
+        return (argv, 0, "ok", "")
+
+    import dataclasses
+    from jevdo.config import Command, Subcommand
+    cfg = EnvConfig(
+        model="jev-latest", min_confidence=0.5, timeout=60.0,
+        commands=(
+            Command(name="ruff", description="lint", argv=None, subcommands=(
+                Subcommand(name="check", description="lint",
+                           argv=("ruff", "check")),
+                Subcommand(name="format", description="fmt",
+                           argv=("ruff", "format", "--check")),
+            )),
+        ))
+    (tmp_path / "src").mkdir(exist_ok=True)
+    steps, reason = dispatch_sequence(
+        cfg, "lint then format", str(tmp_path), client=FakeClient(),
+        execute_fn=scripted_exec, max_steps=2, repeat_guard=True)
+    assert [tuple(s.argv) for s in steps] == [
+        ("ruff", "check"), ("ruff", "format", "--check")]
+    assert reason == "max_steps reached"
+
+
 def test_dispatch_clips_history_and_asks_continue(config, tmp_path):
     seen = {}
 
@@ -272,7 +409,7 @@ def test_cli_run_sequence_stops_when_jev_declines(monkeypatch, config):
         return PlanOutcome(True, a, "ok", 0.9), {}, {}, object()
 
     monkeypatch.setattr(cli, "dispatch", fake_dispatch)
-    monkeypatch.setattr(cli, "continue_requested", lambda resp: next(answers))
+    monkeypatch.setattr(cli, "continue_requested", lambda resp, threshold=None: next(answers))
 
     def fake_exec(cfg, action, cwd):
         calls["n"] += 1
@@ -354,7 +491,7 @@ def test_sequence_logs_plan_and_result(tmp_path):
     with JsonlLogger(str(path)) as log:
         steps, reason = dispatch_sequence(
             cfg, "run tests", ".", client=FakeClient(), execute_fn=ok_exec,
-            max_steps=2, logger=log)
+            max_steps=2, logger=log, repeat_guard=False)
     assert len(steps) == 2
     events = [json.loads(line) for line in path.read_text().splitlines()]
     assert [e["type"] for e in events] == ["plan", "result", "plan", "result"]

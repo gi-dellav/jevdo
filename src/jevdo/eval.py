@@ -13,6 +13,7 @@ Schema (eval.toml):
   expect_abstain = true           # optional; pass iff Jev abstains (no expected)
   cwd = "subdir"                  # optional; overrides base --cwd for this test
   min_confidence = 0.8            # optional; overrides CLI/global thresholds
+  continue_threshold = 0.4        # optional; overrides the __continue__ gate bar
 
   [[test]]
   name = "stage then status"
@@ -55,6 +56,7 @@ class EvalCase:
     expect_abstain: bool = False
     cwd: str | None = None
     min_confidence: float | None = None
+    continue_threshold: float | None = None
 
     @property
     def steps(self) -> int:
@@ -107,6 +109,7 @@ def load_eval(path: str) -> list[EvalCase]:
         raise EvalError(f"{path}: [meta] must be a table")
     meta_cwd = _opt_cwd(meta, f"{path} [meta]")
     meta_conf = _opt_threshold(meta, f"{path} [meta]")
+    meta_cont = _opt_threshold(meta, f"{path} [meta]", key="continue_threshold")
 
     raw_tests = data.get("test")
     if raw_tests is None:
@@ -118,17 +121,18 @@ def load_eval(path: str) -> list[EvalCase]:
     seen_names: set[str] = set()
     for i, raw in enumerate(raw_tests, 1):
         default_name = f"test-{i}"
-        cases.append(_parse_case(raw, i, default_name, path, meta_cwd, meta_conf, seen_names))
+        cases.append(_parse_case(raw, i, default_name, path, meta_cwd, meta_conf, seen_names, meta_cont))
     return cases
 
 
 def _parse_case(d: dict, idx: int, default_name: str, path: str,
                 meta_cwd: str | None, meta_conf: float | None,
-                seen_names: set[str]) -> EvalCase:
+                seen_names: set[str], meta_cont: float | None = None) -> EvalCase:
     ctx = f"{path} [[test]] #{idx}"
     if not isinstance(d, dict):
         raise EvalError(f"{ctx}: test must be a table")
-    allowed = {"name", "input", "expected", "expect_abstain", "cwd", "min_confidence"}
+    allowed = {"name", "input", "expected", "expect_abstain", "cwd",
+               "min_confidence", "continue_threshold"}
     for k in d:
         if k not in allowed:
             raise EvalError(f"{ctx}: unknown key '{k}'")
@@ -196,9 +200,14 @@ def _parse_case(d: dict, idx: int, default_name: str, path: str,
     else:
         conf = meta_conf
 
+    if "continue_threshold" in d:
+        cont = _opt_threshold(d, ctx, key="continue_threshold")
+    else:
+        cont = meta_cont
+
     return EvalCase(name=name, input=request, expected=expected,
                     expected_str=expected_str, expect_abstain=expect_abstain,
-                    cwd=cwd, min_confidence=conf)
+                    cwd=cwd, min_confidence=conf, continue_threshold=cont)
 
 
 def _opt_cwd(d: dict, ctx: str) -> str | None:
@@ -213,18 +222,19 @@ def _opt_cwd(d: dict, ctx: str) -> str | None:
     return v
 
 
-def _opt_threshold(d: dict, ctx: str) -> float | None:
-    v = d.get("min_confidence")
+def _opt_threshold(d: dict, ctx: str, key: str = "min_confidence") -> float | None:
+    v = d.get(key)
     if v is None:
         return None
     if not isinstance(v, (int, float)) or not 0 <= v <= 1:
-        raise EvalError(f"{ctx}: 'min_confidence' must be a number in [0, 1]")
+        raise EvalError(f"{ctx}: '{key}' must be a number in [0, 1]")
     return float(v)
 
 
 def run_eval(config, cases: list[EvalCase], base_cwd: str = ".", *,
              client=None, min_confidence: float | None = None,
-             temperature: float | None = None) -> EvalSummary:
+             temperature: float | None = None,
+             continue_threshold: float | None = None) -> EvalSummary:
     """Plan each case via Jev and compare against expected. Never executes.
 
     Single-string cases use dispatcher.dispatch() with max_steps=1.
@@ -232,6 +242,10 @@ def run_eval(config, cases: list[EvalCase], base_cwd: str = ".", *,
     max_steps=len(expected) and an execute_fn that only resolves argv, so no
     subprocess runs and no confirm prompt appears. Every step's argv must match
     the matching expected entry. Returns an EvalSummary.
+
+    NOTE: eval runs with ``repeat_guard=False`` so a pinned identical plan
+    across steps (e.g. ``["pytest -q", "pytest -q"]``) is accepted as-is;
+    the P2 anti-repeat retry only fires on live chained runs.
     """
     from jevdo.dispatcher import dispatch, dispatch_sequence
     from jevdo.executor import ExecutionError, resolve_argv
@@ -243,6 +257,8 @@ def run_eval(config, cases: list[EvalCase], base_cwd: str = ".", *,
     for case in cases:
         cwd = os.path.join(base_cwd, case.cwd) if case.cwd else base_cwd
         bar = case.min_confidence if case.min_confidence is not None else min_confidence
+        cont_bar = (case.continue_threshold if case.continue_threshold is not None
+                    else continue_threshold)
         n = case.steps
         try:
             if case.expect_abstain:
@@ -280,7 +296,8 @@ def run_eval(config, cases: list[EvalCase], base_cwd: str = ".", *,
             else:
                 steps, reason = dispatch_sequence(
                     config, case.input, cwd, client=client, min_confidence=bar,
-                    max_steps=n, temperature=temperature, execute_fn=no_exec)
+                    max_steps=n, temperature=temperature, execute_fn=no_exec,
+                    continue_threshold=cont_bar, repeat_guard=False)
                 if not steps:
                     results.append(EvalTestResult(case, False, None, reason))
                     continue

@@ -1,0 +1,351 @@
+[meta]
+# Defaults for every [[test]] in this file.
+min_confidence = 0.5
+
+# `expected` strings are single-shot (max_steps = 1); lists are multi-step
+# (max_steps = len(expected)). Eval plans only — nothing executes.
+
+# ---------------------------------------------------------------- core
+[[test]]
+name = "status"
+input = "show git status"
+expected = "git status"
+
+[[test]]
+name = "status paraphrase"
+input = "check git working tree state"
+expected = "git status"
+
+[[test]]
+name = "brief history"
+input = "brief git history"
+expected = "git log --oneline"
+
+[[test]]
+name = "bare history"
+input = "show commits by giuseppe"
+expected = "git log"
+
+[[test]]
+name = "last five commits"
+input = "show the last 5 commits"
+expected = "git log --max-count=5"
+
+[[test]]
+name = "brief last twenty"
+input = "show the last 20 commits in compact form"
+expected = "git log --oneline --max-count=20"
+
+[[test]]
+name = "diff stat"
+input = "show diff stats"
+expected = "git diff --stat"
+
+[[test]]
+name = "bare diff"
+input = "show the current diff"
+expected = "git diff"
+
+[[test]]
+name = "list branches"
+input = "list git branches"
+expected = "git branch"
+
+[[test]]
+name = "branches paraphrase"
+input = "which branches exist"
+expected = "git branch"
+
+[[test]]
+name = "all branches"
+input = "list all git branches including remotes"
+expected = "git branch -a"
+
+[[test]]
+name = "remotes shorthand"
+input = "show remote branches too"
+expected = "git branch -a"
+
+# ---------------------------------------------------------------- paths
+[[test]]
+name = "stage main file"
+input = "stage the src main python file"
+expected = "git add src/main.py"
+
+[[test]]
+name = "stage utils file"
+input = "stage the utils python file"
+expected = "git add src/utils.py"
+
+[[test]]
+name = "list docs dir"
+input = "list files in docs"
+expected = "ls docs"
+
+[[test]]
+name = "copy main into docs"
+input = "copy the src main file into docs"
+expected = "cp src/main.py docs"
+
+[[test]]
+name = "copy utils into docs"
+input = "copy src/utils.py to docs"
+expected = "cp src/utils.py docs"
+
+# ---------------------------------------------------------------- harder one-shots
+# Tricky single-step cases: stacked flags under new phrasings, bare optional
+# slots (flag off / path omitted), ambiguity that must resolve to "do the
+# safe thing", and near-miss operations that must abstain.
+
+[[test]]
+name = "brief last ten"
+input = "show the last 10 commits briefly"
+expected = "git log --oneline --max-count=10"
+
+[[test]]
+name = "bare ls detail"
+input = "list everything here in detail"
+expected = "ls -la"
+
+[[test]]
+name = "bare ls"
+input = "list files"
+expected = "ls"
+
+[[test]]
+name = "copy here"
+input = "copy src/main.py here"
+expected = "cp src/main.py"
+
+[[test]]
+name = "repo state"
+input = "status of the repo"
+expected = "git status"
+
+[[test]]
+name = "casual status"
+input = "gimme git status"
+expected = "git status"
+
+[[test]]
+name = "whole history"
+input = "show the whole history, all of it"
+expected = "git log"
+
+[[test]]
+name = "local only"
+input = "list only local branches"
+expected = "git branch"
+
+[[test]]
+name = "not compact"
+input = "show full history, not the compact form"
+expected = "git log"
+
+[[test]]
+name = "summarize changes"
+input = "summarize the changes"
+expected = "git diff --stat"
+
+[[test]]
+name = "show patch"
+input = "show me the patch"
+expected = "git diff"
+
+[[test]]
+name = "stage all abstains"
+input = "stage all python files"
+expect_abstain = true
+
+[[test]]
+name = "copy all abstains"
+input = "copy all python files into docs"
+expect_abstain = true
+
+[[test]]
+name = "blame abstains"
+input = "show git blame for main.py"
+expect_abstain = true
+
+[[test]]
+name = "amend abstains"
+input = "amend the last commit"
+expect_abstain = true
+
+# ---------------------------------------------------------------- harder one-shots, round 2
+# Verified live 2/2 (input-fragile near-misses deliberately excluded, see
+# BENCHMARKS.md "Rejected during probing"). Antonym/adversarial phrasings
+# that must resolve correctly, plus destructive near-misses that must abstain.
+
+[[test]]
+name = "compact five"
+input = "show 5 recent commits compactly"
+expected = "git log --oneline --max-count=5"
+
+[[test]]
+name = "full five"
+input = "show 5 recent commits with full messages"
+expected = "git log --max-count=5"
+
+[[test]]
+name = "tree clean"
+input = "is my tree clean?"
+expected = "git status"
+
+[[test]]
+name = "unstaged compact"
+input = "show unstaged changes compactly"
+expected = "git diff --stat"
+
+[[test]]
+name = "whats here"
+input = "what's in here?"
+expected = "ls"
+
+[[test]]
+name = "duplicate file"
+input = "duplicate main.py into docs"
+expected = "cp src/main.py docs"
+
+[[test]]
+name = "back up file"
+input = "back up utils.py into docs"
+expected = "cp src/utils.py docs"
+
+[[test]]
+name = "copy bare"
+input = "copy the utils file"
+expected = "cp src/utils.py"
+
+[[test]]
+name = "dirty tree"
+input = "is the working tree dirty?"
+expected = "git status"
+
+[[test]]
+name = "lately commits"
+input = "what have we been committing lately?"
+expected = "git log"
+
+[[test]]
+name = "current dir"
+input = "list the current directory"
+expected = "ls"
+
+[[test]]
+name = "uncommitted full"
+input = "show my uncommitted changes in full"
+expected = "git diff"
+
+[[test]]
+name = "outstanding work"
+input = "anything outstanding?"
+expected = "git status"
+
+[[test]]
+name = "overview changes"
+input = "give me a summary of all changes"
+expected = "git diff --stat"
+
+[[test]]
+name = "newest first"
+input = "show the newest commits first"
+expected = "git log"
+
+[[test]]
+name = "current branch"
+input = "which branch am I on?"
+expected = "git branch"
+
+[[test]]
+name = "move trap abstains"
+input = "move main.py into docs"
+expect_abstain = true
+
+[[test]]
+name = "revert trap abstains"
+input = "revert main.py to HEAD"
+expect_abstain = true
+
+[[test]]
+name = "squash trap abstains"
+input = "squash the last two commits"
+expect_abstain = true
+
+[[test]]
+name = "fetch trap abstains"
+input = "fetch the latest from origin"
+expect_abstain = true
+
+[[test]]
+name = "tag trap abstains"
+input = "tag the current commit v1.0"
+expect_abstain = true
+
+[[test]]
+name = "rename trap abstains"
+input = "rename main.py to app.py"
+expect_abstain = true
+
+[[test]]
+name = "clone trap abstains"
+input = "clone the repo into /tmp/copy"
+expect_abstain = true
+
+# ---------------------------------------------------------------- chains
+# Chained cases are Jev-decided: the model must affirm the __continue__ gate
+# and plan step 2 correctly. Known-flaky: the gate sometimes declines or the
+# second step repeats step 1.
+
+[[test]]
+name = "stage then status"
+input = "stage the src main python file then show status"
+expected = ["git add src/main.py", "git status"]
+# Jev's __continue__ gate hovers ~0.4 on this pair; 0.3 keeps the chain
+# alive without touching the read/write confidence bars.
+continue_threshold = 0.3
+
+# ---------------------------------------------------------------- negatives
+# Unsupported operations must abstain: no commit/push/stash/merge/checkout,
+# no reset (not an allowlisted subcommand), no delete, no markdown staging
+# (add slot is globbed to *.py).
+
+[[test]]
+name = "commit abstains"
+input = "commit all staged changes with message fix it"
+expect_abstain = true
+
+[[test]]
+name = "push abstains"
+input = "push the current branch to origin"
+expect_abstain = true
+
+[[test]]
+name = "stash abstains"
+input = "stash my uncommitted changes"
+expect_abstain = true
+
+[[test]]
+name = "merge abstains"
+input = "merge the feature branch into main"
+expect_abstain = true
+
+[[test]]
+name = "reset abstains"
+input = "unstage all staged files"
+expect_abstain = true
+
+[[test]]
+name = "delete abstains"
+input = "delete the notes file"
+expect_abstain = true
+
+[[test]]
+name = "stage markdown abstains"
+input = "stage the notes markdown file"
+expect_abstain = true
+
+[[test]]
+name = "nonsense abstains"
+input = "launch the rockets to mars"
+expect_abstain = true

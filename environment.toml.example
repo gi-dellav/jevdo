@@ -11,6 +11,8 @@ provider = "typesafe"
 default_risk = "read"
 max_steps = 1
 # max_history = 5          # cap history entries sent to Jev when chaining (0 = none)
+# continue_threshold = 0.5 # Noul bar for the __continue__ chaining gate (0..1)
+# continue_question = "..."  # override the __continue__ gate instructions
 # temperature = 0.0        # sampling temperature passed in extra_body
 command_question = "What shell task is the user asking for?"
   [meta.risk_thresholds]

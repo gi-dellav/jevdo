@@ -15,6 +15,8 @@ max_steps = 1               # 1..10 upper bound; >1 lets Jev decide to continue
 max_history = 5             # optional; cap history entries sent back to Jev
 temperature = 0.0           # optional; passed to Jev via extra_body
 command_question = "..."    # optional override for the L1 question text
+continue_threshold = 0.5    # optional; Noul bar for the `__continue__` gate (0..1)
+continue_question = "..."   # optional override for the `__continue__` instructions
   [meta.risk_thresholds]
   read = 0.5
   write = 0.7
@@ -168,6 +170,8 @@ class EnvConfig:
     max_history: int | None = None
     temperature: float | None = None
     command_question: str | None = None
+    continue_threshold: float = 0.5
+    continue_question: str | None = None
     provider: str = "typesafe"
     base_url: str | None = None
 
@@ -592,6 +596,14 @@ def load_config(path: str) -> EnvConfig:
     command_question = None
     if meta.get("command_question") is not None:
         command_question = _opt_instruction(meta, "command_question", "meta")
+    continue_threshold = meta.get("continue_threshold", 0.5)
+    if (not isinstance(continue_threshold, (int, float))
+            or isinstance(continue_threshold, bool)
+            or not 0 <= continue_threshold <= 1):
+        raise ConfigError("meta.continue_threshold must be a number in [0, 1]")
+    continue_question = None
+    if meta.get("continue_question") is not None:
+        continue_question = _opt_instruction(meta, "continue_question", "meta")
     provider = meta.get("provider", "typesafe")
     if not isinstance(provider, str) or provider.strip() not in PROVIDERS:
         raise ConfigError(f"meta.provider must be one of {PROVIDERS}")
@@ -625,6 +637,8 @@ def load_config(path: str) -> EnvConfig:
         max_steps=max_steps, max_history=max_history,
         temperature=(float(temperature) if temperature is not None else None),
         command_question=command_question,
+        continue_threshold=float(continue_threshold),
+        continue_question=continue_question,
         provider=provider, base_url=base_url,
     )
 
@@ -658,6 +672,16 @@ def node_risk(config: EnvConfig, cmd: Command, sub: Subcommand | None) -> str:
     if cmd.risk is not None:
         return cmd.risk
     return config.default_risk
+
+
+def effective_continue_threshold(config: EnvConfig,
+                                   *, cli_override: float | None = None) -> tuple[float, str]:
+    """Noul bar for the `__continue__` gate: CLI > meta > default. Returns (bar, source)."""
+    if cli_override is not None:
+        return cli_override, "cli --continue-threshold"
+    if config.continue_threshold != 0.5:
+        return config.continue_threshold, "meta continue_threshold"
+    return 0.5, "default"
 
 
 def effective_threshold(config: EnvConfig, cmd: Command, sub: Subcommand | None,

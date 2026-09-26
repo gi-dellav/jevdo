@@ -62,6 +62,8 @@ timeout = 60
 default_risk = "read"     # read | write | destructive
 max_steps = 1             # 1..10 upper bound; >1 lets Jev decide to continue
 max_history = 5           # optional; cap history entries sent back to Jev
+continue_threshold = 0.5  # optional; Noul bar for the __continue__ chaining gate
+continue_question = "..." # optional; override the __continue__ gate instructions
 temperature = 0.0         # optional; sampling temperature (extra_body)
 command_question = "What shell task is the user asking for?"
 
@@ -137,6 +139,7 @@ jevdo "copy readme into docs"          # -> cp README.md docs
 jevdo "run tests" --max-steps 3        # dynamic chaining: Jev decides each step
 jevdo "run tests" --max-steps 1        # single shot (never asks to continue)
 jevdo "run tests" --max-history 2      # send back at most 2 prior steps
+jevdo "run tests" --continue-threshold 0.3  # lower the __continue__ chaining bar (CLI wins)
 jevdo "run tests" --temperature 0.2    # sampling temperature (extra_body)
 jevdo "run tests" --log run.jsonl      # opt-in structured JSONL run log
 jevdo "run tests" --min-confidence 0.8 # CLI flag wins over all config
@@ -161,9 +164,12 @@ Threshold resolution (highest first): CLI `--min-confidence` > per-node > per-ri
 `--max-steps N` / `meta.max_steps` set the step budget. N is the upper bound, not a fixed count (`--steps` is a legacy alias).
 
 - While budget remains, each Jev call also answers a `__continue__` Noul gate. After a step succeeds, the loop stops as soon as Jev declines. A missing gate is treated as "stop".
+- The gate bar resolves CLI `--continue-threshold` > `[meta] continue_threshold` > 0.5 default, and is logged per step (`continue_threshold[_source]` in `plan` events). Per-eval-test `continue_threshold` overrides it for that test.
+- On step 2+, the L1 and `__continue__` instructions are step-aware: they name the step number, the completed steps (`node` + argv), and the remaining budget, so Jev plans the *next* part instead of repeating. History entries also carry `node`/`describe` alongside `argv`.
+- If a step resolves to the previous step's argv verbatim, the harness re-plans once with an anti-repeat nudge instead of executing a duplicate; a second repeat stops honestly (`repeat_guard=False` disables this for canned unit probes; eval pins it off).
 - With `--max-steps 1`, the gate is never asked and the run is single-shot.
-- After each step, the CWD is rescanned and `{argv, returncode, stdout_tail}` is appended to the Jev state history. `--max-history N` / `meta.max_history` keeps only the N most recent entries (0 sends none; unset sends all, still bounded by the step budget).
-- The run stops on abstention, non-zero exit (unless `--no-stop-on-error`), decline, Jev's stop decision, or budget exhaustion.
+- After each step, the CWD is rescanned and `{step, node, describe, argv, returncode, stdout_tail}` is appended to the Jev state history (`state["step"]`/`state["max_steps"]` ride along too). `--max-history N` / `meta.max_history` keeps only the N most recent entries (0 sends none; unset sends all, still bounded by the step budget).
+- The run stops on abstention, non-zero exit (unless `--no-stop-on-error`), decline, Jev's stop decision, a repeated step, or budget exhaustion.
 
 `dispatch_sequence()` in `dispatcher.py` exposes this programmatically.
 
@@ -188,7 +194,7 @@ input = "launch the rockets"
 expect_abstain = true             # pass iff Jev abstains (no expected)
 ```
 
-Per-test overrides exist for `cwd` (relative, joined onto `--cwd`) and `min_confidence`. `[meta]` provides defaults for both.
+Per-test overrides exist for `cwd` (relative, joined onto `--cwd`), `min_confidence`, and `continue_threshold`. `[meta]` provides defaults for all three.
 
 - A string `expected` runs single-shot (`max_steps = 1`, no `__continue__` gate).
 - An array runs `max_steps = len(expected)`. Every planned step's argv must match the matching entry, so Jev must not stop early.
@@ -215,4 +221,4 @@ Nothing is written without `--log`. The file opens in append mode.
 - `src/jevdo/cli.py` – `jevdo` entrypoint, confirm prompt, step transcript
 - `src/jevdo/eval.py` – `--eval` toml loading + no-exec comparison harness
 - `src/jevdo/runlog.py` – opt-in JSONL run logging (`--log`)
-- `tests/` – 105 tests (`PYTHONPATH=src:tests pytest`)
+- `tests/` – 116 tests (`PYTHONPATH=src:tests pytest`)

@@ -213,3 +213,30 @@ def test_temperature_parsing(tmp_path):
     with pytest.raises(ConfigError, match="temperature"):
         load_config(_write(tmp_path, BASE.replace(
             'model = "jev-latest"', 'model = "jev-latest"\ntemperature = 3')))
+
+
+def test_continue_threshold_parsing(tmp_path):
+    from jevdo.config import effective_continue_threshold
+    cfg = load_config(_write(tmp_path, BASE))
+    assert cfg.continue_threshold == 0.5
+    assert cfg.continue_question is None
+    assert effective_continue_threshold(cfg) == (0.5, "default")
+    cfg2 = load_config(_write(tmp_path, BASE.replace(
+        'model = "jev-latest"',
+        'model = "jev-latest"\ncontinue_threshold = 0.3')))
+    assert cfg2.continue_threshold == 0.3
+    assert effective_continue_threshold(cfg2) == (0.3, "meta continue_threshold")
+    assert effective_continue_threshold(cfg2, cli_override=0.8) == (0.8, "cli --continue-threshold")
+    cfg3 = load_config(_write(tmp_path, BASE.replace(
+        'model = "jev-latest"',
+        'model = "jev-latest"\ncontinue_question = "Keep going?"')))
+    assert cfg3.continue_question == "Keep going?"
+    for bad in ("1.5", "-0.1", "true", '"x"'):
+        with pytest.raises(ConfigError, match="continue_threshold"):
+            load_config(_write(tmp_path, BASE.replace(
+                'model = "jev-latest"',
+                f'model = "jev-latest"\ncontinue_threshold = {bad}')))
+    with pytest.raises(ConfigError, match="<= 500 chars"):
+        load_config(_write(tmp_path, BASE.replace(
+            'model = "jev-latest"',
+            'model = "jev-latest"\ncontinue_question = "' + "q" * 501 + '"')))

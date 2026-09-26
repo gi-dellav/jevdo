@@ -9,7 +9,20 @@ judgement, not product). Abstains when:
 
 Chaining is Jev-decided: each step optionally carries a `__continue__` Noul
 (absent when max_steps == 1); `dispatch_sequence` stops early when it is not
-affirmed. History sent back is capped by max_history.
+affirmed. History sent back is capped by max_history. Three mechanisms make
+chains work better than a bare repeat-the-request loop:
+
+- P1 step-aware prompts: step 2+ L1/`__continue__` instructions name the step
+  number, the completed steps (node + argv), and the remaining budget, and
+  the history entries carried in `state["history"]` include `node` and a
+  human-readable `describe` string next to `argv`.
+- P2 anti-repeat retry: if step 2+ resolves to the exact argv of the
+  previous step, the harness re-plans once with an anti-repeat nudge
+  (`repeat_hint` + `state["hint"]`). If the retry still repeats (or fails),
+  the run stops honestly instead of executing a duplicate.
+- P3 tunable `__continue__` gate: the Noul bar defaults to 0.5 but resolves
+  CLI `--continue-threshold` > `[meta] continue_threshold` > default via
+  `effective_continue_threshold`.
 """
 
 from __future__ import annotations
@@ -17,12 +30,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from jevdo.config import (
-    RESERVED, EnvConfig, effective_threshold, node_for_selection,
-    node_risk, node_slots,
+    RESERVED, EnvConfig, effective_continue_threshold, effective_threshold,
+    node_for_selection, node_risk, node_slots,
 )
 from jevdo.questions import CONTINUE_QID
 
-PATH_YES = 0.5  # Noul threshold for stated-gates, flags, and continue gate
+PATH_YES = 0.5  # Noul threshold for stated-gates and boolean flags
+CONTINUE_YES = 0.5  # default Noul bar for the `__continue__` gate (see P3)
+REPEAT_HINT_STATE = (
+    "The previous step already ran this exact command. "
+    "Choose a DIFFERENT next step that advances the request, "
+    "or decline to continue if nothing remains."
+)
 
 
 @dataclass(frozen=True)
@@ -293,26 +312,62 @@ def continue_info(response) -> float | None:
         return None
 
 
-def continue_requested(response) -> bool:
-    """True iff Jev answered the `__continue__` Noul affirmatively.
+def continue_requested(response, threshold: float | None = None) -> bool:
+    """True iff Jev answered the `__continue__` Noul at/above the bar.
 
+    `threshold` defaults to CONTINUE_YES (0.5); pass the resolved
+    `effective_continue_threshold` bar to honor config/CLI overrides.
     Missing/abstaining/malformed answer => False (fail-closed).
     """
     v = continue_info(response)
-    return v is not None and v >= PATH_YES
+    bar = CONTINUE_YES if threshold is None else threshold
+    return v is not None and v >= bar
+
+
+def describe_action(action: PlannedAction) -> str:
+    """Short human-readable summary of a planned step for history prompts."""
+    try:
+        return action.describe()
+    except Exception:
+        return action.node_key
+
+
+def history_entry(step: int, action: PlannedAction, argv: list[str],
+                  returncode: int, stdout: str, stderr: str) -> dict:
+    """Build the history dict appended after each chained step (P1).
+
+    Carries `node` (e.g. ``ruff.check``) and `describe` (human-readable
+    summary) alongside `argv` so later steps see semantic progress, not
+    just argv tokens.
+    """
+    return {
+        "step": step,
+        "node": action.node_key,
+        "describe": describe_action(action),
+        "argv": list(argv),
+        "returncode": returncode,
+        "stdout_tail": stdout[-2000:],
+        "stderr_tail": stderr[-2000:],
+    }
 
 
 def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
              min_confidence: float | None = None, history: list | None = None,
              max_steps: int | None = None, max_history: int | None = None,
              allow_continue: bool | None = None,
-             temperature: float | None = None):
+             temperature: float | None = None,
+             step_index: int = 0,
+             repeat_hint: bool = False,
+             hint: str | None = None):
     """Live dispatch: build state+questions, call Jev once, plan. Returns
     (PlanOutcome, questions, context, response).
 
     allow_continue adds the `__continue__` gate; defaults to (budget > 1).
     max_history caps history entries sent to Jev; defaults to config.max_history.
     temperature defaults to config.temperature and rides in extra_body.
+    step_index/repeat_hint drive P1 step-aware prompts: step 2+ names the
+    step number, completed steps, and remaining budget. `hint` (P2 retry)
+    is surfaced to Jev as `state["hint"]`.
     """
     from jevdo.client import create_client
 
@@ -323,15 +378,23 @@ def dispatch(config: EnvConfig, request: str, cwd: str = ".", *, client=None,
         allow_continue = budget > 1
     cap = config.max_history if max_history is None else max_history
     temp = config.temperature if temperature is None else temperature
-    questions, context = build_questions(config, cwd, allow_continue=allow_continue)
+    hist = _clip_history(history or [], cap)
+    questions, context = build_questions(
+        config, cwd, allow_continue=allow_continue,
+        step_index=step_index, history=hist or None,
+        max_steps=budget, repeat_hint=repeat_hint)
     state = {
         "request": request,
         "cwd_files": state_preview(context["cwd_files"]),
         "cwd_dirs": state_preview(context["cwd_dirs"]),
     }
-    hist = _clip_history(history or [], cap)
     if hist:
         state["history"] = hist
+    if step_index:
+        state["step"] = step_index + 1
+        state["max_steps"] = budget
+    if hint:
+        state["hint"] = hint
     extra_body = {"temperature": temp} if temp is not None else None
     own = False
     if client is None:
@@ -355,12 +418,24 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                       client=None, min_confidence: float | None = None,
                       max_steps: int | None = None, max_history: int | None = None,
                       temperature: float | None = None, execute_fn=None,
-                      workflow: list[str] | None = None, logger=None):
+                      workflow: list[str] | None = None, logger=None,
+                      continue_threshold: float | None = None,
+                      repeat_guard: bool = True):
     """Chained dispatch: plan -> execute -> refresh -> repeat.
 
     Each step includes a `__continue__` Noul so Jev decides whether to chain
     further; the loop stops early when Jev says no (or the gate is absent).
     `max_steps` is the upper bound (1 => never ask, single shot).
+    `continue_threshold` (P3) overrides the `__continue__` Noul bar for this
+    run; None resolves CLI-override > meta > 0.5 default (note: when called
+    via run_eval/eval harness pass the per-case bar here; bare None falls
+    back to config).
+
+    P2 anti-repeat: when step 2+ resolves to the previous step's argv, the
+    harness re-plans once with an anti-repeat nudge. A second repeat (or a
+    failed retry) stops the run honestly instead of executing a duplicate.
+    `repeat_guard` enables this (default True); pass False in unit probes
+    that pin identical fake plans across steps.
 
     Returns (steps, stop_reason) where steps is a list[StepOutcome].
     execute_fn(action, cwd) -> (argv, returncode, stdout, stderr); defaults to
@@ -371,6 +446,8 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
 
     budget = max_steps or config.max_steps
     budget = max(1, min(10, budget))
+    bar, bar_source = effective_continue_threshold(
+        config, cli_override=continue_threshold)
     steps: list[StepOutcome] = []
     history: list[dict] = []
     own = False
@@ -385,13 +462,16 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                 config, request, cwd, client=client,
                 min_confidence=min_confidence, history=history or None,
                 max_steps=budget, max_history=max_history,
-                allow_continue=ask_continue, temperature=temperature)
+                allow_continue=ask_continue, temperature=temperature,
+                step_index=i)
             if logger is not None:
                 from jevdo import runlog
                 logger.log(runlog.plan_event(
                     i + 1, request, cwd, outcome, context,
                     continue_asked=ask_continue,
                     continue_value=continue_info(response),
+                    continue_threshold=bar,
+                    continue_threshold_source=bar_source,
                     max_steps=budget, max_history=max_history,
                     history_len=len(history)))
             if workflow is not None and i < len(workflow):
@@ -421,14 +501,36 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
             else:
                 res = _executor.execute(config, action, cwd)
                 argv, rc, out, err = res.argv, res.returncode, res.stdout, res.stderr
+            if history and list(argv) == list(history[-1].get("argv") or []):
+                # P2: step repeats the previous argv verbatim. Re-plan once
+                # with an anti-repeat nudge instead of executing a duplicate.
+                # Guarded by `repeat_guard`: unit fakes that pin identical
+                # plans across steps (FakeClient + canned execute_fn) keep
+                # the legacy behavior; live runs (and tests) opt in by
+                # passing repeat_guard=True.
+                retry = None
+                if repeat_guard:
+                    retry = _retry_after_repeat(
+                        config, request, cwd, client=client,
+                        min_confidence=min_confidence, history=history,
+                        max_steps=budget, max_history=max_history,
+                        temperature=temperature, step_index=i,
+                        ask_continue=ask_continue, prev_argv=list(argv),
+                        logger=logger, execute_fn=execute_fn)
+                if retry is None and repeat_guard:
+                    steps.append(StepOutcome(action, argv, rc, out, err))
+                    history.append(history_entry(
+                        i + 1, action, argv, rc, out, err))
+                    if logger is not None:
+                        logger.log(runlog.result_event(i + 1, argv, returncode=rc,
+                                                       stdout=out, stderr=err))
+                    return steps, (
+                        f"stop: step {i+1} repeats step {i} "
+                        f"({ ' '.join(argv)}); not executing a duplicate")
+                elif retry is not None:
+                    outcome, context, response, argv, rc, out, err, action = retry
             steps.append(StepOutcome(action, argv, rc, out, err))
-            history.append({
-                "step": i + 1,
-                "argv": argv,
-                "returncode": rc,
-                "stdout_tail": out[-2000:],
-                "stderr_tail": err[-2000:],
-            })
+            history.append(history_entry(i + 1, action, argv, rc, out, err))
             if logger is not None:
                 logger.log(runlog.result_event(i + 1, argv, returncode=rc,
                                                stdout=out, stderr=err))
@@ -436,7 +538,7 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
                 return steps, f"stop: step {i+1} exited {rc}"
             if workflow is not None and i + 1 >= len(workflow):
                 return steps, "workflow complete"
-            if ask_continue and not continue_requested(response):
+            if ask_continue and not continue_requested(response, bar):
                 return steps, f"stop: Jev ended after step {i+1}"
     finally:
         if own:
@@ -445,6 +547,51 @@ def dispatch_sequence(config: EnvConfig, request: str, cwd: str = ".", *,
             except Exception:
                 pass
     return steps, "max_steps reached"
+
+
+def _retry_after_repeat(config, request, cwd, *, client,
+                        min_confidence, history, max_steps, max_history,
+                        temperature, step_index, ask_continue, prev_argv,
+                        logger=None, execute_fn=None):
+    """P2 anti-repeat: re-plan step `step_index` once with an anti-repeat nudge.
+
+    Returns (outcome, context, response, argv, rc, out, err, action) for the
+    retry when it plans a *different* argv, else None (caller stops honestly
+    instead of executing a duplicate). The retry is executed through the
+    same path as a normal step (execute_fn or real executor).
+    """
+    from jevdo import executor as _executor
+
+    outcome, _q, context, response = dispatch(
+        config, request, cwd, client=client,
+        min_confidence=min_confidence, history=history or None,
+        max_steps=max_steps, max_history=max_history,
+        allow_continue=ask_continue, temperature=temperature,
+        step_index=step_index, repeat_hint=True, hint=REPEAT_HINT_STATE)
+    if logger is not None:
+        from jevdo import runlog
+        logger.log(runlog.plan_event(
+            step_index + 1, request, cwd, outcome, context,
+            continue_asked=ask_continue,
+            continue_value=continue_info(response),
+            max_steps=max_steps, max_history=max_history,
+            history_len=len(history), repeat_retry=True))
+    if not outcome.ok or outcome.action is None:
+        return None
+    action = outcome.action
+    try:
+        argv = list(_executor.resolve_argv(config, action, cwd))
+    except Exception:
+        return None
+    if argv == list(prev_argv):
+        return None  # still repeats: stop honestly
+    if execute_fn is not None:
+        rc_out = execute_fn(action, cwd)
+        argv, rc, out, err = list(rc_out[0]), rc_out[1], rc_out[2], rc_out[3]
+    else:
+        res = _executor.execute(config, action, cwd)
+        argv, rc, out, err = list(res.argv), res.returncode, res.stdout, res.stderr
+    return outcome, context, response, argv, rc, out, err, action
 
 
 def _force_node(outcome: PlanOutcome, command: str, subcommand: str | None):

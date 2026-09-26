@@ -1,0 +1,116 @@
+[meta]
+model = "jev-latest"
+min_confidence = 0.5
+timeout = 60
+# Default provider for this example: OpenRouter System One API.
+# Billed to your OpenRouter account. Requires OPENROUTER_API_KEY.
+provider = "openrouter"
+default_risk = "read"
+max_steps = 1
+max_history = 5
+command_question = "What Python QA task is the user asking for: run tests, lint, format-check, run a script, or list files?"
+  [meta.risk_thresholds]
+  read = 0.5
+  write = 0.7
+  destructive = 0.9
+
+# ---------------------------------------------------------------- pytest
+[[command]]
+name = "pytest"
+description = "run the Python test suite, e.g. 'run tests', 'run tests with short traceback', or as the second step after linting like 'lint then run tests'"
+argv = ["pytest", "-q"]
+risk = "read"
+min_confidence = 0.5
+
+  [[command.flag]]
+  name = "-x"
+  description = "stop after the first failure, e.g. 'run tests stopping at first failure'"
+  argv_fragment = ["-x"]
+  question = "Does the user want to stop after the first failure?"
+
+  [[command.flag]]
+  name = "--tb"
+  description = "traceback verbosity for test failures"
+  argv_fragment = ["--tb={value}"]
+  values = ["short", "long", "no"]
+  question = "Does the request ask for a specific traceback verbosity?"
+  [command.flag.value_descriptions]
+  short = "short traceback summary"
+  long = "full long traceback"
+  no = "no traceback output"
+
+# ---------------------------------------------------------------- ruff
+[[command]]
+name = "ruff"
+description = "lint or format-check Python code, e.g. 'lint the code', 'check formatting', or as the first step of a two-part task like 'lint then run tests'"
+risk = "read"
+instructions_subcommand = "Does the request need a lint check or a format check?"
+
+  [[command.subcommand]]
+  name = "check"
+  description = "lint Python code, e.g. 'lint the code', 'lint src/app.py', or the first half of 'lint then run tests'"
+  argv = ["ruff", "check", "{path:target}"]
+  risk = "read"
+
+    [[command.subcommand.path]]
+    name = "target"
+    kind = "both"
+    optional = true
+    description = "file or directory to lint (omit to lint the whole project)"
+    base = "."
+    depth = 2
+    glob = "*.py"
+    question = "Which file or directory should be linted?"
+    stated_question = "Does the request name a specific file or directory to lint?"
+
+  [[command.subcommand]]
+  name = "format"
+  description = "format-check Python code without writing, e.g. 'check formatting'"
+  argv = ["ruff", "format", "--check", "{path:target}"]
+  risk = "read"
+
+    [[command.subcommand.path]]
+    name = "target"
+    kind = "both"
+    optional = true
+    description = "file or directory to format-check (omit for the whole project)"
+    base = "."
+    depth = 2
+    glob = "*.py"
+    question = "Which file or directory should be format-checked?"
+    stated_question = "Does the request name a specific file or directory to format-check?"
+
+# ---------------------------------------------------------------- python
+[[command]]
+name = "python"
+description = "run a Python script, e.g. 'run the app script'"
+argv = ["python", "{path:script}"]
+risk = "read"
+
+  [[command.path]]
+  name = "script"
+  kind = "files"
+  optional = false
+  description = "Python script to run"
+  base = "."
+  depth = 2
+  glob = "*.py"
+  question = "Which Python script does the request want to run?"
+  stated_question = "Does the request name a specific Python script to run?"
+
+# ---------------------------------------------------------------- ls
+[[command]]
+name = "ls"
+description = "list directory contents, e.g. 'list files here' or 'list files in tests'"
+argv = ["ls", "{path:target}"]
+risk = "read"
+
+  [[command.path]]
+  name = "target"
+  kind = "dirs"
+  optional = true
+  description = "directory to list"
+  base = "."
+  depth = 2
+  question = "Which directory does the request want to list?"
+  stated_question = "Does the request name a specific directory to list?"

@@ -1,0 +1,294 @@
+[meta]
+# Defaults for every [[test]] in this file.
+min_confidence = 0.5
+
+# `expected` strings are single-shot (max_steps = 1); lists are multi-step
+# (max_steps = len(expected)). Eval plans only — nothing executes.
+
+# ---------------------------------------------------------------- pytest
+[[test]]
+name = "run tests"
+input = "run tests"
+expected = "pytest -q"
+
+[[test]]
+name = "run suite paraphrase"
+input = "run the test suite for the app"
+expected = "pytest -q"
+
+[[test]]
+name = "run tests stop early"
+input = "run tests stopping at the first failure"
+expected = "pytest -q -x"
+
+[[test]]
+name = "run tests short traceback"
+input = "run tests with short traceback"
+expected = "pytest -q --tb=short"
+
+[[test]]
+name = "run tests long traceback"
+input = "run tests with full long tracebacks"
+expected = "pytest -q --tb=long"
+
+[[test]]
+name = "run tests no traceback"
+input = "run tests with no traceback output"
+expected = "pytest -q --tb=no"
+
+[[test]]
+name = "run tests both flags"
+input = "run tests stopping at the first failure with short tracebacks"
+expected = "pytest -q -x --tb=short"
+
+# ---------------------------------------------------------------- ruff
+[[test]]
+name = "lint project"
+input = "lint the code"
+expected = "ruff check"
+
+[[test]]
+name = "lint app file"
+input = "lint the src app file"
+expected = "ruff check src/app.py"
+
+[[test]]
+name = "lint test file"
+input = "lint the tests test_app python file"
+expected = "ruff check tests/test_app.py"
+
+[[test]]
+name = "format check"
+input = "check formatting"
+expected = "ruff format --check"
+
+[[test]]
+name = "format check app file"
+input = "check formatting of the src app file"
+expected = "ruff format --check src/app.py"
+
+# ---------------------------------------------------------------- run/list
+[[test]]
+name = "run app script"
+input = "run the src app script"
+expected = "python src/app.py"
+
+[[test]]
+name = "run app paraphrase"
+input = "execute the src app python script directly with the interpreter"
+expected = "python src/app.py"
+
+[[test]]
+name = "list tests dir"
+input = "list files in tests"
+expected = "ls tests"
+
+[[test]]
+name = "list src dir"
+input = "list files in src"
+expected = "ls src"
+
+# ---------------------------------------------------------------- harder one-shots
+# Tricky single-step cases: requests that name no tool, use synonyms, or
+# gesture at unsupported options — Jev must map to the closest allowlisted
+# argv or abstain. All expectations below verified live 2/2 runs.
+
+[[test]]
+name = "coverage flagless"
+input = "run tests with coverage"
+expected = "pytest -q"
+
+[[test]]
+name = "filter flagless"
+input = "run only the test for add"
+expected = "pytest -q"
+
+[[test]]
+name = "lint everything"
+input = "lint everything"
+expected = "ruff check"
+
+[[test]]
+name = "verify formatting"
+input = "verify formatting everywhere"
+expected = "ruff format --check"
+
+[[test]]
+name = "test app file"
+input = "test the app file"
+expected = "pytest -q"
+
+[[test]]
+name = "unit tests"
+input = "run the unit tests"
+expected = "pytest -q"
+
+[[test]]
+name = "pytest by tool"
+input = "use pytest to check everything passes"
+expected = "pytest -q"
+
+[[test]]
+name = "quiet tests"
+input = "run tests quietly"
+expected = "pytest -q"
+
+[[test]]
+name = "format quietly"
+input = "check formatting quietly without fixing anything"
+expected = "ruff format --check"
+
+[[test]]
+name = "python on tests"
+input = "run python on tests"
+expected = "pytest -q"
+
+# ---------------------------------------------------------------- harder one-shots, round 2
+# Verified live 2/2. Adversarial phrasings: unsupported-option traps that
+# must degrade to base argv, destructive near-misses that must abstain.
+
+[[test]]
+name = "verbose trap"
+input = "run tests verbosely"
+expected = "pytest -q"
+
+[[test]]
+name = "stop early no traceback"
+input = "run tests stopping at the first failure with no traceback output"
+expected = "pytest -q -x --tb=no"
+
+[[test]]
+name = "long keep going"
+input = "run tests with long tracebacks but keep going through all failures"
+expected = "pytest -q --tb=long"
+
+[[test]]
+name = "whole suite"
+input = "run the whole suite"
+expected = "pytest -q"
+
+[[test]]
+name = "start app"
+input = "start the app"
+expected = "python src/app.py"
+
+[[test]]
+name = "execute interpreter"
+input = "execute src/app.py with the python interpreter"
+expected = "python src/app.py"
+
+[[test]]
+name = "format app explicit"
+input = "run ruff format --check on src/app.py"
+expected = "ruff format --check src/app.py"
+
+[[test]]
+name = "root contents"
+input = "what's in the project root?"
+expected = "ls"
+
+[[test]]
+name = "audit app"
+input = "audit src/app.py for issues"
+expected = "ruff check src/app.py"
+
+[[test]]
+name = "build passing"
+input = "is the build passing?"
+expected = "pytest -q"
+
+[[test]]
+name = "hygiene repo"
+input = "check code hygiene across the repo"
+expected = "ruff check"
+
+[[test]]
+name = "test doctor"
+input = "run the test doctor"
+expected = "pytest -q"
+
+[[test]]
+name = "tidy formatting"
+input = "is the formatting tidy?"
+expected = "ruff format --check"
+
+[[test]]
+name = "mypy maps to lint"
+input = "run mypy on the app"
+expected = "ruff check"
+
+[[test]]
+name = "fix lint maps to lint"
+input = "fix all lint issues in the app"
+expected = "ruff check"
+
+[[test]]
+name = "apply format maps to check"
+input = "apply formatting checks to the app file"
+expected = "ruff format --check"
+
+[[test]]
+name = "lint both maps to lint"
+input = "lint both the app and test files"
+expected = "ruff check"
+
+[[test]]
+name = "lint app and tests"
+input = "lint the app together with the test files"
+expected = "ruff check"
+
+# ---------------------------------------------------------------- chains
+# Chained cases are Jev-decided: the model must affirm the __continue__ gate
+# and plan step 2 correctly. Known-flaky: the gate sometimes declines or the
+# second step repeats step 1 instead of switching commands.
+
+[[test]]
+name = "lint then format"
+input = "first lint the code, then check formatting"
+expected = ["ruff check", "ruff format --check"]
+# Kept as a pinned known-failure: Jev plans step 1 fine (conf ~0.9) but the
+# step-2 subcommand choice stalls at check-vs-format ~50/50 with conf
+# 0.26–0.47, below the read bar however the __continue__ gate is set. Lowering
+# min_confidence would paper over it; the harness correctly stops instead of
+# executing a wrong/repeated step (P2 anti-repeat guard).
+
+# ---------------------------------------------------------------- negatives
+# Unsupported operations must abstain: no pip/venv, no debugger, no -k
+# filtering (not an allowlisted flag), no python -c one-liners (the script
+# slot requires an existing *.py file), no in-place formatting (format runs
+# with --check only).
+
+[[test]]
+name = "pip install abstains"
+input = "install the project dependencies with pip"
+expect_abstain = true
+
+[[test]]
+name = "venv abstains"
+input = "create a virtual environment"
+expect_abstain = true
+
+[[test]]
+name = "upgrade abstains"
+input = "upgrade all outdated pip packages"
+expect_abstain = true
+
+[[test]]
+name = "debugger abstains"
+input = "open a python debugger on the app"
+expect_abstain = true
+
+[[test]]
+name = "oneliner abstains"
+input = "run python with a one-liner to print hello"
+expect_abstain = true
+
+[[test]]
+name = "format write abstains"
+input = "format the app file in place"
+expect_abstain = true
+
+[[test]]
+name = "nonsense abstains"
+input = "launch the rockets to mars"
+expect_abstain = true

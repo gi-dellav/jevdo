@@ -24,13 +24,18 @@ def test_plan_event_fields():
     ev = plan_event(1, "req", ".", out,
                     {"cwd_files": ["a"], "cwd_dirs": ["d"]},
                     continue_asked=True, continue_value=0.8,
+                    continue_threshold=0.4,
+                    continue_threshold_source="meta continue_threshold",
                     max_steps=3, max_history=2, history_len=0)
     assert ev["type"] == "plan"
     assert ev["command"] == "git" and ev["subcommand"] == "status"
     assert ev["continue_asked"] is True and ev["continue"] == 0.8
+    assert ev["continue_threshold"] == 0.4
+    assert ev["continue_threshold_source"] == "meta continue_threshold"
     assert ev["cwd_files"] == ["a"] and ev["cwd_dirs"] == ["d"]
     assert ev["max_steps"] == 3 and ev["max_history"] == 2
     assert ev["layers"] == []
+    assert ev["repeat_retry"] is False
 
 
 def test_result_event_fields():

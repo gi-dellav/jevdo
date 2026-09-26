@@ -8,7 +8,9 @@ Layers:
 - L4 paths: one `path.<node>.<slot>` Choice + optional
   `path_stated.<node>.<slot>` Noul gate, per slot.
 - Chaining: optional `__continue__` Noul when `allow_continue` is set; Jev
-  decides whether another step should follow.
+  decides whether another step should follow. On step 2+ the L1 and
+  `__continue__` instructions are step-aware (step number, completed
+  steps, remaining budget) so Jev plans the *next* part, not a repeat.
 
 Custom instructions: [meta] command_question, per-command
 instructions_subcommand, per-slot question/stated_question, per-flag question.
@@ -32,6 +34,15 @@ CONTINUE_INSTRUCTIONS = (
     "current step finishes it."
 )
 
+#: Extra hint appended to the `__continue__` instructions when Jev just
+#: re-planned an argv identical to the previous step. Nudges the model to
+#: pick a *different* next step instead of repeating itself.
+REPEAT_HINT_INSTRUCTIONS = (
+    " The previous step already ran this exact command. Do not repeat it;"
+    " pick a different next step that advances the request, or answer no"
+    " if nothing remains."
+)
+
 MAX_CHOICE_OPTIONS = 255  # Jev Choice limit
 STATE_PREVIEW_LIMIT = 100
 
@@ -40,26 +51,70 @@ def _node_key(cmd: str, sub: str | None) -> str:
     return cmd if sub is None else f"{cmd}.{sub}"
 
 
+def _history_summary(history: list | None) -> str:
+    """One-line-per-step summary of completed steps for step-aware prompts."""
+    lines: list[str] = []
+    for h in history or []:
+        step = h.get("step", "?")
+        desc = h.get("describe") or " ".join(str(a) for a in (h.get("argv") or []))
+        node = h.get("node")
+        lines.append(f"step {step} ({node}): {desc}" if node else f"step {step}: {desc}")
+    return "; ".join(lines)
+
+
 def build_questions(config: EnvConfig, cwd: str = ".", *,
-                    allow_continue: bool = False):
+                    allow_continue: bool = False,
+                    step_index: int = 0,
+                    history: list | None = None,
+                    max_steps: int | None = None,
+                    repeat_hint: bool = False):
     """Return (questions, context).
 
     context = {"candidates": {(node, slot): [names]},
                "cwd_files": [...], "cwd_dirs": [...]}
     Legacy "node" keys are also present for single-slot nodes.
     When allow_continue is true, a `__continue__` Noul is included.
+
+    Step-aware chaining (P1): when `history` is non-empty (i.e. this is step
+    2+), the L1 and `__continue__` instructions name the step number, the
+    completed steps, and the remaining budget, so Jev can tell "done" from
+    "next part". Step 1 (no history) keeps the exact legacy wording.
+    `repeat_hint` appends an anti-repeat nudge to the `__continue__`
+    instructions (P2 retry path).
     """
     questions: dict = {}
     candidates: dict = {}
 
+    budget = config.max_steps if max_steps is None else max_steps
+    step_no = step_index + 1
+
     if allow_continue:
-        questions[CONTINUE_QID] = Noul(instructions=CONTINUE_INSTRUCTIONS)
+        instructions = (
+            config.continue_question or CONTINUE_INSTRUCTIONS)
+        if history:
+            done = _history_summary(history)
+            instructions = (
+                f"{instructions} This is step {step_no} of at most {budget} "
+                f"for the request. Steps already completed: {done}. "
+                f"Answer yes only if a further step is still needed.")
+        if repeat_hint:
+            instructions = f"{instructions}{REPEAT_HINT_INSTRUCTIONS}"
+        questions[CONTINUE_QID] = Noul(instructions=instructions)
 
     # L1: command
     cmd_criteria = {c.name: c.description for c in config.commands}
     cmd_criteria[RESERVED] = NONE_DESC
+    l1_instructions = (config.command_question
+                       or "What shell task is the user asking for?")
+    if history:
+        done = _history_summary(history)
+        l1_instructions = (
+            f"{l1_instructions} This is step {step_no} of at most {budget} "
+            f"for the request. Steps already completed: {done}. "
+            f"Pick the command for the NEXT step, not a repeat of a "
+            f"completed step.")
     questions["__command__"] = Choice(
-        instructions=config.command_question or "What shell task is the user asking for?",
+        instructions=l1_instructions,
         criteria=cmd_criteria,
     )
 

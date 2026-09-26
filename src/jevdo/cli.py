@@ -1,6 +1,6 @@
 """CLI: jevdo "<request>" [--env ...] [--dry-run] [--show-probs] [--min-confidence X]
-  [--max-steps N] [--max-history N] [--temperature T] [--log PATH]
-  [--provider typesafe|openrouter] [--base-url URL]
+  [--max-steps N] [--max-history N] [--continue-threshold T] [--temperature T]
+  [--log PATH] [--provider typesafe|openrouter] [--base-url URL]
 
 Eval mode: jevdo --eval eval.toml [--env ...] [--cwd ...] (never executes; a
 string `expected` runs max_steps = 1, an array runs len(expected) steps)."""
@@ -12,7 +12,9 @@ import dataclasses
 import sys
 
 from jevdo.config import ConfigError, load_config
-from jevdo.dispatcher import continue_info, continue_requested, dispatch
+from jevdo.dispatcher import (
+    continue_info, continue_requested, describe_action, dispatch,
+)
 from jevdo.eval import EvalError, _join, load_eval, run_eval
 from jevdo.executor import ExecutionError, execute, resolve_argv
 from jevdo.runlog import JsonlLogger, eval_event, plan_event, result_event
@@ -65,6 +67,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--max-history", type=int, default=None, metavar="N",
                    help="max history entries sent back to Jev when chaining "
                         "(default: meta.max_history; 0 sends none)")
+    p.add_argument("--continue-threshold", type=float, default=None, metavar="T",
+                   help="Noul bar for the __continue__ chaining gate "
+                        "(default: meta.continue_threshold, 0.5; CLI wins)")
     p.add_argument("--temperature", type=float, default=None, metavar="T",
                    help="sampling temperature passed to Jev in extra_body "
                         "(default: meta.temperature)")
@@ -115,6 +120,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_CONFIG
     if args.max_history is not None and args.max_history < 0:
         print("jevdo: --max-history must be >= 0", file=sys.stderr)
+        return EXIT_CONFIG
+    if args.continue_threshold is not None and not 0 <= args.continue_threshold <= 1:
+        print("jevdo: --continue-threshold must be in [0, 1]", file=sys.stderr)
         return EXIT_CONFIG
     if args.temperature is not None and not 0 <= args.temperature <= 2:
         print("jevdo: --temperature must be in [0, 2]", file=sys.stderr)
@@ -231,6 +239,9 @@ def run_sequence(config, args, budget: int, logger=None) -> int:
     """
     history: list[dict] = []
     final = EXIT_OK
+    from jevdo.config import effective_continue_threshold
+    cont_bar, cont_source = effective_continue_threshold(
+        config, cli_override=args.continue_threshold)
     for i in range(budget):
         ask_continue = budget > 1 and i + 1 < budget
         try:
@@ -238,7 +249,8 @@ def run_sequence(config, args, budget: int, logger=None) -> int:
                 config, args.request, args.cwd,
                 min_confidence=args.min_confidence, history=history or None,
                 max_steps=budget, max_history=args.max_history,
-                allow_continue=ask_continue, temperature=args.temperature)
+                allow_continue=ask_continue, temperature=args.temperature,
+                step_index=i)
         except (ConfigError, ValueError) as e:
             print(f"jevdo: step {i+1}: {e}", file=sys.stderr)
             return EXIT_CONFIG if isinstance(e, ConfigError) else EXIT_ABSTAIN
@@ -250,6 +262,8 @@ def run_sequence(config, args, budget: int, logger=None) -> int:
                 i + 1, args.request, args.cwd, outcome, context,
                 continue_asked=ask_continue,
                 continue_value=continue_info(response),
+                continue_threshold=cont_bar,
+                continue_threshold_source=cont_source,
                 max_steps=budget, max_history=args.max_history,
                 history_len=len(history)))
         if args.show_probs:
@@ -282,9 +296,13 @@ def run_sequence(config, args, budget: int, logger=None) -> int:
                   f"risk {action.risk}) [dry-run]")
             if logger is not None:
                 logger.log(result_event(i + 1, preview, dry_run=True))
-            if ask_continue and not continue_requested(response):
+            if ask_continue and not continue_requested(response, cont_bar):
                 print(f"jevdo: done after step {i+1} (dry-run)")
                 return EXIT_OK
+            history.append({"step": i + 1, "node": action.node_key,
+                            "describe": describe_action(action),
+                            "argv": preview, "returncode": 0,
+                            "stdout_tail": "", "stderr_tail": ""})
             continue
         confirmed = True
         if action.risk in ("write", "destructive"):
@@ -313,14 +331,16 @@ def run_sequence(config, args, budget: int, logger=None) -> int:
             logger.log(result_event(i + 1, preview,
                                     returncode=result.returncode,
                                     stdout=result.stdout, stderr=result.stderr))
-        history.append({"step": i + 1, "argv": preview, "returncode": result.returncode,
+        history.append({"step": i + 1, "node": action.node_key,
+                        "describe": describe_action(action),
+                        "argv": preview, "returncode": result.returncode,
                         "stdout_tail": result.stdout[-2000:], "stderr_tail": result.stderr[-2000:]})
         if result.returncode != 0:
             final = EXIT_EXEC_FAIL
             if args.stop_on_error:
                 print(f"jevdo: stop: step {i+1} exited {result.returncode}")
                 return final
-        if ask_continue and not continue_requested(response):
+        if ask_continue and not continue_requested(response, cont_bar):
             print(f"jevdo: done after step {i+1}")
             return final
     if args.dry_run:
@@ -337,7 +357,8 @@ def run_eval_file(config, args, logger=None) -> int:
         print(f"jevdo: eval error: {e}", file=sys.stderr)
         return EXIT_CONFIG
     summary = run_eval(config, cases, args.cwd, min_confidence=args.min_confidence,
-                       temperature=args.temperature)
+                       temperature=args.temperature,
+                       continue_threshold=args.continue_threshold)
     for r in summary.results:
         if logger is not None:
             logger.log(eval_event(r.case, r))

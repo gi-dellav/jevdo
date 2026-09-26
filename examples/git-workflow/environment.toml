@@ -1,0 +1,149 @@
+[meta]
+model = "jev-latest"
+min_confidence = 0.5
+timeout = 60
+# Default provider for this example: OpenRouter System One API.
+# Billed to your OpenRouter account. Requires OPENROUTER_API_KEY.
+provider = "openrouter"
+default_risk = "read"
+max_steps = 1
+max_history = 5
+command_question = "What shell task is the user asking for?"
+  [meta.risk_thresholds]
+  read = 0.5
+  write = 0.7
+  destructive = 0.9
+
+# ---------------------------------------------------------------- git
+[[command]]
+name = "git"
+description = "version control operations like status, log, diff, staging files, or chained pairs like 'stage then show status'"
+risk = "read"
+instructions_subcommand = "Which git subcommand does the request need: status, log, diff, staging (add), or branch?"
+
+  [[command.subcommand]]
+  name = "status"
+  description = "show working tree status, e.g. 'show git status' or the second step of 'stage then show status'"
+  argv = ["git", "status"]
+  risk = "read"
+
+  [[command.subcommand]]
+  name = "log"
+  description = "show commit history, e.g. 'show recent commits' or 'brief git history'"
+  argv = ["git", "log"]
+  risk = "read"
+
+    [[command.subcommand.flag]]
+    name = "--oneline"
+    description = "compact one-line-per-commit history, e.g. 'brief git history'"
+    argv_fragment = ["--oneline"]
+    question = "Does the user explicitly ask for brief, compact, or one-line-per-commit history? A bare number like 'last 5 commits' alone does not ask for this."
+
+    [[command.subcommand.flag]]
+    name = "--max-count"
+    description = "limit history to a fixed number of commits"
+    argv_fragment = ["--max-count={value}"]
+    values = ["5", "10", "20"]
+    question = "Does the request state an explicit number of commits to show, e.g. 'last 5 commits'? Vague words like 'brief' or 'recent' without a number do not count."
+    [command.subcommand.flag.value_descriptions]
+    "5" = "last 5 commits"
+    "10" = "last 10 commits"
+    "20" = "last 20 commits"
+
+  [[command.subcommand]]
+  name = "diff"
+  description = "show uncommitted changes, e.g. 'show diff' or 'show diff stats'"
+  argv = ["git", "diff"]
+  risk = "read"
+
+    [[command.subcommand.flag]]
+    name = "--stat"
+    description = "compact diff stat summary instead of the full patch"
+    argv_fragment = ["--stat"]
+    question = "Does the user want a compact diff stat summary?"
+
+    [[command.subcommand.path]]
+    name = "scope"
+    kind = "both"
+    optional = true
+    description = "file or directory to limit the diff to"
+    base = "."
+    depth = 2
+    question = "Does the request limit the diff to a specific file or directory?"
+    stated_question = "Does the request name a specific file or directory for the diff?"
+
+  [[command.subcommand]]
+  name = "add"
+  description = "stage a file for commit, e.g. 'stage src/main.py' or the first step of 'stage then show status'"
+  argv = ["git", "add", "{path:src}"]
+  risk = "write"
+
+    [[command.subcommand.path]]
+    name = "src"
+    kind = "files"
+    optional = false
+    description = "file to stage for commit"
+    base = "."
+    depth = 3
+    glob = "*.py"
+    question = "Which Python file does the request want to stage?"
+    stated_question = "Does the request name a specific Python file to stage?"
+
+  [[command.subcommand]]
+  name = "branch"
+  description = "list local branches, e.g. 'list git branches'"
+  argv = ["git", "branch"]
+  risk = "read"
+
+    [[command.subcommand.flag]]
+    name = "-a"
+    description = "list all branches including remotes"
+    argv_fragment = ["-a"]
+    question = "Does the user want to include remote branches?"
+
+# ---------------------------------------------------------------- ls
+[[command]]
+name = "ls"
+description = "list directory contents, e.g. 'list files here' or 'list files in docs'"
+argv = ["ls", "{path:target}"]
+risk = "read"
+
+  [[command.flag]]
+  name = "-la"
+  description = "long detailed listing including hidden entries"
+  argv_fragment = ["-la"]
+
+  [[command.path]]
+  name = "target"
+  kind = "dirs"
+  optional = true
+  description = "directory to list"
+  base = "."
+  depth = 2
+  question = "Which directory does the request want to list?"
+  stated_question = "Does the request name a specific directory to list?"
+
+# ---------------------------------------------------------------- cp
+[[command]]
+name = "cp"
+description = "copy a file into a directory, e.g. 'copy readme into docs'"
+argv = ["cp", "{path:src}", "{path:dst}"]
+risk = "write"
+
+  [[command.path]]
+  name = "src"
+  kind = "files"
+  optional = false
+  description = "source file to copy"
+  base = "."
+  depth = 2
+
+  [[command.path]]
+  name = "dst"
+  kind = "dirs"
+  optional = true
+  description = "destination directory (defaults to current directory)"
+  base = "."
+  depth = 2
+  question = "Which destination directory should the file be copied into?"
+  stated_question = "Does the request name a destination directory?"

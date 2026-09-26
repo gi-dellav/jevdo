@@ -88,6 +88,30 @@ expected = ["git add README.md", "git status"]
     assert case.expected_str == ("git add README.md", "git status")
 
 
+def test_load_continue_threshold(tmp_path):
+    body = """\
+[meta]
+continue_threshold = 0.3
+
+[[test]]
+name = "a"
+input = "x"
+expected = ["git status", "git status"]
+
+[[test]]
+name = "b"
+input = "y"
+expected = ["git status", "git status"]
+continue_threshold = 0.7
+"""
+    a, b = load_eval(_write(tmp_path, body))
+    assert a.continue_threshold == 0.3  # meta default
+    assert b.continue_threshold == 0.7  # per-test wins
+    with pytest.raises(EvalError, match="continue_threshold"):
+        load_eval(_write(tmp_path, '[[test]]\ninput = "x"\n'
+                                   'expected = "y"\ncontinue_threshold = 2\n'))
+
+
 def test_load_multistep_array_errors(tmp_path):
     with pytest.raises(EvalError, match="list of command strings"):
         load_eval(_write(tmp_path, '[[test]]\ninput = "x"\nexpected = []\n'))
